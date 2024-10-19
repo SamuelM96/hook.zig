@@ -159,6 +159,32 @@ fn baseAddress(allocator: std.mem.Allocator, pid: pid_t, filename: []const u8) !
     return error.NotFoundInMapsFile;
 }
 
+fn breakUntil(pid: pid_t, addr: usize) !void {
+    var inst: u16 = undefined;
+    std.log.debug("Patching 0x{x} with a breakpoint...", .{addr});
+    try ptrace(PTRACE.PEEKDATA, pid, addr, @intFromPtr(&inst));
+    try ptrace(PTRACE.POKEDATA, pid, addr, 0xCC);
+
+    std.log.debug("Continuing until breakpoint @ 0x{x}...", .{addr});
+    while (true) {
+        try ptrace(PTRACE.CONT, pid, 0, 0);
+        const result = std.posix.waitpid(pid, 0);
+        const signal = c.WSTOPSIG(@as(c_int, @intCast(result.status)));
+        if (c.WIFSTOPPED(result.status) and signal == c.SIGTRAP) {
+            break;
+        }
+    }
+
+    var regs: c.user_regs_struct = undefined;
+    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
+    std.log.debug("Hit breakpoint @ 0x{x}...", .{regs.rip});
+    std.log.debug("Restoring previous instruction 0x{x}...", .{inst});
+    regs.rip -= 1;
+    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
+    try ptrace(PTRACE.POKEDATA, pid, addr, inst);
+    return;
+}
+
 test "create rwx page with mmap" {
     // TODO: Add tests
     // Hmmm, what would be the best way to do this... Integration tests with sample programs?
