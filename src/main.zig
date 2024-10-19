@@ -11,7 +11,6 @@ const c = @cImport({
     @cInclude("capstone/capstone.h");
 });
 
-const CSErrors = error{FailedToDisassemble};
 var CSHandle: c.csh = undefined;
 
 pub fn main() !void {
@@ -56,7 +55,7 @@ inline fn attach(pid: pid_t) !void {
     const result = std.posix.waitpid(pid, 0);
     if (!c.WIFSTOPPED(result.status)) {
         std.log.debug("Error: {}", .{result});
-        return error.WaitPidFailed;
+        return error.WaitpidFailed;
     }
 }
 
@@ -113,7 +112,7 @@ fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
     const result = std.posix.waitpid(pid, 0);
     if (!c.WIFSTOPPED(result.status)) {
         std.log.debug("Error: {}", .{result.status});
-        return error.WaitPidFailed;
+        return error.WaitpidFailed;
     }
     const signal = c.WSTOPSIG(@as(c_int, @intCast(result.status)));
     std.log.debug("Signal: {}", .{signal});
@@ -131,7 +130,7 @@ fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
 
 // Do I *need* capstone? It does alleviate the need to write disassemblers for various platforms.
 // Being able to disassemble arbitrary chunks of memory at runtime would be handy.
-fn disassemble(code: []const u8, address: usize) CSErrors!void {
+fn disassemble(code: []const u8, address: usize) !void {
     var insn: [*c]c.cs_insn = undefined;
     const count = c.cs_disasm(CSHandle, @ptrCast(code), code.len, address, 0, &insn);
     defer c.cs_free(insn, count);
@@ -140,7 +139,7 @@ fn disassemble(code: []const u8, address: usize) CSErrors!void {
             std.log.debug("0x{x}:\t{s}\t{s}", .{ insn[i].address, insn[i].mnemonic, insn[i].op_str });
         }
     } else {
-        return CSErrors.FailedToDisassemble;
+        return error.DisassembleFailed;
     }
 }
 
