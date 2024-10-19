@@ -15,7 +15,10 @@ const CSErrors = error{FailedToDisassemble};
 var CSHandle: c.csh = undefined;
 
 pub fn main() !void {
-    const args = try std.process.argsAlloc(std.heap.page_allocator);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+
+    const args = try std.process.argsAlloc(allocator);
     if (args.len != 2) {
         std.log.err("usage: {s} <pid>", .{args[0]});
         return;
@@ -39,6 +42,9 @@ pub fn main() !void {
 
     try attach(pid);
     defer detach(pid) catch |err| std.log.err("Failed to detach from {d}: {}", .{ pid, err });
+
+    const entry = try getEntryFromMemory(allocator, pid);
+    std.log.warn("Entry: 0x{x}", .{entry});
 
     const rxw_page = try injectMmap(pid, 0, std.mem.page_size, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
     std.log.info("RWX @ 0x{x}", .{rxw_page});
@@ -150,10 +156,11 @@ fn baseAddress(allocator: std.mem.Allocator, pid: pid_t, filename: []const u8) !
     var buf: [1024]u8 = undefined;
 
     while (try stream.readUntilDelimiterOrEof(&buf, '\n')) |line| {
-        if (std.mem.indexOf(u8, line, filename)) |_| {
-            const dash_index = std.mem.indexOfScalar(u8, line, '-') orelse return error.InvalidMapsFile;
-            return std.fmt.parseInt(usize, line[0..dash_index], 16);
+        if (filename.len != 0 and std.mem.indexOf(u8, line, filename) == null) {
+            continue;
         }
+        const dash_index = std.mem.indexOfScalar(u8, line, '-') orelse return error.InvalidMapsFile;
+        return std.fmt.parseInt(usize, line[0..dash_index], 16);
     }
 
     return error.NotFoundInMapsFile;
@@ -193,7 +200,7 @@ fn getMinimumMapAddr() !usize {
     return try std.fmt.parseInt(usize, std.mem.trim(u8, buffer[0..count], &std.ascii.whitespace), 10);
 }
 
-fn getEntry(allocator: std.mem.Allocator, filepath: []const u8) !usize {
+fn getEntryFromFile(allocator: std.mem.Allocator, filepath: []const u8) !usize {
     var file = try std.fs.openFileAbsolute(filepath, .{});
     defer file.close();
 
@@ -204,6 +211,18 @@ fn getEntry(allocator: std.mem.Allocator, filepath: []const u8) !usize {
     const hdr = try std.elf.Header.read(&stream);
 
     return hdr.entry;
+}
+
+fn getEntryFromMemory(allocator: std.mem.Allocator, pid: pid_t) !usize {
+    var header: std.elf.Elf64_Ehdr = undefined;
+    const base = try baseAddress(allocator, pid, "");
+    var i: usize = 0;
+    while (i < @sizeOf(@TypeOf(header))) : (i += @sizeOf(usize)) {
+        var data: usize = undefined;
+        try ptrace(PTRACE.PEEKDATA, pid, base + i, @intFromPtr(&data));
+        @memcpy(@as([*]u8, @ptrCast(&header)) + i, &std.mem.toBytes(data));
+    }
+    return header.e_entry;
 }
 
 test "create rwx page with mmap" {
@@ -219,7 +238,7 @@ test "create rwx page with mmap" {
     const filepath = try std.fs.realpathAlloc(allocator, "./zig-out/bin/basic-print-loop");
     defer allocator.free(filepath);
     std.log.debug("Getting entry addresss...", .{});
-    const entry = try getEntry(allocator, filepath);
+    const entry = try getEntryFromFile(allocator, filepath);
     std.log.info("Entry: 0x{x}", .{entry});
 
     var target = std.process.Child.init(&.{
