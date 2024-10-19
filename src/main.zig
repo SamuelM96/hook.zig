@@ -138,6 +138,27 @@ fn disassemble(code: []const u8, address: usize) CSErrors!void {
     }
 }
 
+fn baseAddress(allocator: std.mem.Allocator, pid: pid_t, filename: []const u8) !usize {
+    const maps_path = try std.fmt.allocPrint(allocator, "/proc/{d}/maps", .{pid});
+    defer allocator.free(maps_path);
+
+    const file = try std.fs.openFileAbsolute(maps_path, .{});
+    defer file.close();
+
+    var reader = std.io.bufferedReader(file.reader());
+    var stream = reader.reader();
+    var buf: [1024]u8 = undefined;
+
+    while (try stream.readUntilDelimiterOrEof(&buf, '\n')) |line| {
+        if (std.mem.indexOf(u8, line, filename)) |_| {
+            const dash_index = std.mem.indexOfScalar(u8, line, '-') orelse return error.InvalidMapsFile;
+            return std.fmt.parseInt(usize, line[0..dash_index], 16);
+        }
+    }
+
+    return error.NotFoundInMapsFile;
+}
+
 test "create rwx page with mmap" {
     // TODO: Add tests
     // Hmmm, what would be the best way to do this... Integration tests with sample programs?
