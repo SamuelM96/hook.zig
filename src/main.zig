@@ -185,6 +185,14 @@ fn breakUntil(pid: pid_t, addr: usize) !void {
     return;
 }
 
+fn getMinimumMapAddr() !usize {
+    const mmap_min_addr_file = try std.fs.openFileAbsolute("/proc/sys/vm/mmap_min_addr", .{});
+    defer mmap_min_addr_file.close();
+    var buffer: [64]u8 = undefined;
+    const count = try mmap_min_addr_file.readAll(&buffer);
+    return try std.fmt.parseInt(usize, std.mem.trim(u8, buffer[0..count], &std.ascii.whitespace), 10);
+}
+
 test "create rwx page with mmap" {
     // TODO: Add tests
     // Hmmm, what would be the best way to do this... Integration tests with sample programs?
