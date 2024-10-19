@@ -114,7 +114,7 @@ fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
 // Being able to disassemble arbitrary chunks of memory at runtime would be handy.
 fn disassemble(code: []const u8, address: usize) CSErrors!void {
     var insn: [*c]c.cs_insn = undefined;
-    const count = c.cs_disasm(CSHandle, @ptrCast(&code), code.len, address, 0, &insn);
+    const count = c.cs_disasm(CSHandle, @ptrCast(code), code.len, address, 0, &insn);
     defer c.cs_free(insn, count);
     if (count > 0) {
         for (0..count) |i| {
