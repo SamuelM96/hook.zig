@@ -6,6 +6,7 @@ const pid_t = std.os.linux.pid_t;
 const c = @cImport({
     // Should I just convert these to Zig? What about cross-platform support?
     @cInclude("sys/user.h");
+    @cInclude("sys/wait.h");
     @cInclude("linux/mman.h");
     @cInclude("capstone/capstone.h");
 });
@@ -46,7 +47,11 @@ pub fn main() !void {
 inline fn attach(pid: pid_t) !void {
     std.log.debug("Attaching to {d}...", .{pid});
     try ptrace(PTRACE.ATTACH, pid, 0, 0);
-    _ = std.posix.waitpid(pid, 0);
+    const result = std.posix.waitpid(pid, 0);
+    if (!c.WIFSTOPPED(result.status)) {
+        std.log.debug("Error: {}", .{result});
+        return error.WaitPidFailed;
+    }
 }
 
 inline fn detach(pid: pid_t) !void {
@@ -98,7 +103,13 @@ fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
 
     std.log.debug("Executing syscall...", .{});
     try ptrace(PTRACE.SINGLESTEP, pid, 0, 0);
-    _ = std.posix.waitpid(pid, 0);
+    const result = std.posix.waitpid(pid, 0);
+    if (!c.WIFSTOPPED(result.status)) {
+        std.log.debug("Error: {}", .{result.status});
+        return error.WaitPidFailed;
+    }
+    const signal = c.WSTOPSIG(@as(c_int, @intCast(result.status)));
+    std.log.debug("Signal: {}", .{signal});
 
     std.log.debug("Getting register data...", .{});
     try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(regs));
