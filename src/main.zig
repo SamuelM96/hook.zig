@@ -193,6 +193,19 @@ fn getMinimumMapAddr() !usize {
     return try std.fmt.parseInt(usize, std.mem.trim(u8, buffer[0..count], &std.ascii.whitespace), 10);
 }
 
+fn getEntry(allocator: std.mem.Allocator, filepath: []const u8) !usize {
+    var file = try std.fs.openFileAbsolute(filepath, .{});
+    defer file.close();
+
+    const raw = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    defer allocator.free(raw);
+
+    var stream = std.io.fixedBufferStream(raw);
+    const hdr = try std.elf.Header.read(&stream);
+
+    return hdr.entry;
+}
+
 test "create rwx page with mmap" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
@@ -203,17 +216,20 @@ test "create rwx page with mmap" {
     }
     defer _ = c.cs_close(&CSHandle);
 
+    const filepath = try std.fs.realpathAlloc(allocator, "./zig-out/bin/basic-print-loop");
+    defer allocator.free(filepath);
+    std.log.debug("Getting entry addresss...", .{});
+    const entry = try getEntry(allocator, filepath);
+    std.log.info("Entry: 0x{x}", .{entry});
+
     var target = std.process.Child.init(&.{
-        "./zig-out/bin/basic-print-loop",
+        filepath,
     }, allocator);
 
     try target.spawn();
     std.log.info("PID: {}", .{target.id});
 
     try attach(target.id);
-
-    // TODO: Calculate entry, or at least a good point to hook from
-    const entry = 0x1001540;
     try breakUntil(target.id, entry);
 
     const rxw_page = try injectMmap(target.id, 0, std.mem.page_size, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
