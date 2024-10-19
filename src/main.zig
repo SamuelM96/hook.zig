@@ -47,12 +47,16 @@ pub fn main() !void {
 
     const rxw_page = try injectMmap(pid, 0, std.mem.page_size, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
     std.log.info("RWX @ 0x{x}", .{rxw_page});
+
+    // TODO: Load a PIC shared object into memory and have the target jump to it
 }
 
 inline fn attach(pid: pid_t) !void {
     std.log.debug("Attaching to {d}...", .{pid});
     try ptrace(PTRACE.ATTACH, pid, 0, 0);
     const result = std.posix.waitpid(pid, 0);
+    // FIX: Probably need to handle signal-delivery-stop here
+    // TODO: Refactor waitpid logic, its handled the same way around the code pretty much
     if (!c.WIFSTOPPED(result.status)) {
         std.log.debug("Error: {}", .{result});
         return error.WaitpidFailed;
@@ -64,6 +68,7 @@ inline fn detach(pid: pid_t) !void {
     try ptrace(PTRACE.DETACH, pid, 0, 0);
 }
 
+// TODO: Alternative: scan for code caves
 inline fn injectMmap(pid: pid_t, addr: usize, length: usize, prot: i64, flags: i64, fd: i64, offset: usize) !usize {
     var regs: c.user_regs_struct = undefined;
     try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
@@ -85,6 +90,8 @@ inline fn injectMmap(pid: pid_t, addr: usize, length: usize, prot: i64, flags: i
 }
 
 fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
+    // HACK: Technically this save/restore logic would be make into an inline wrapper or similar
+    // I'll wait until the code gets more complex to avoid premature optimisaton.
     var orig_regs: c.user_regs_struct = undefined;
     try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&orig_regs));
     std.log.debug("Original registers: {}", .{orig_regs});
@@ -130,6 +137,7 @@ fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
 
 // Do I *need* capstone? It does alleviate the need to write disassemblers for various platforms.
 // Being able to disassemble arbitrary chunks of memory at runtime would be handy.
+// TODO: Disassemble arbitrary locations in memory
 fn disassemble(code: []const u8, address: usize) !void {
     var insn: [*c]c.cs_insn = undefined;
     const count = c.cs_disasm(CSHandle, @ptrCast(code), code.len, address, 0, &insn);
@@ -165,6 +173,8 @@ fn baseAddress(allocator: std.mem.Allocator, pid: pid_t, filename: []const u8) !
     return error.NotFoundInMapsFile;
 }
 
+// TODO: Conditional breakpoints
+// TODO: Track breakpoints in their own data structure so they can be configured at any point without continuing directly to them
 fn breakUntil(pid: pid_t, addr: usize) !void {
     var inst: u16 = undefined;
     std.log.debug("Patching 0x{x} with a breakpoint...", .{addr});
@@ -172,6 +182,7 @@ fn breakUntil(pid: pid_t, addr: usize) !void {
     try ptrace(PTRACE.POKEDATA, pid, addr, 0xCC);
 
     std.log.debug("Continuing until breakpoint @ 0x{x}...", .{addr});
+    // FIX: I should probably feed the signals I don't care about back to the target to handle
     while (true) {
         try ptrace(PTRACE.CONT, pid, 0, 0);
         const result = std.posix.waitpid(pid, 0);
@@ -212,6 +223,7 @@ fn getEntryFromFile(allocator: std.mem.Allocator, filepath: []const u8) !usize {
     return hdr.entry;
 }
 
+// TODO: Get other function addresses by parsing ELF files
 fn getEntryFromMemory(allocator: std.mem.Allocator, pid: pid_t) !usize {
     var header: std.elf.Elf64_Ehdr = undefined;
     const base = try baseAddress(allocator, pid, "");
