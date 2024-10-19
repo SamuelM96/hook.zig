@@ -44,7 +44,7 @@ pub fn main() !void {
     defer detach(pid) catch |err| std.log.err("Failed to detach from {d}: {}", .{ pid, err });
 
     const entry = try getEntryFromMemory(allocator, pid);
-    std.log.warn("Entry: 0x{x}", .{entry});
+    std.log.info("Entry: 0x{x}", .{entry});
 
     const rxw_page = try injectMmap(pid, 0, std.mem.page_size, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
     std.log.info("RWX @ 0x{x}", .{rxw_page});
