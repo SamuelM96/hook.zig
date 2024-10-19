@@ -7,7 +7,11 @@ const c = @cImport({
     // Should I just convert these to Zig? What about cross-platform support?
     @cInclude("sys/user.h");
     @cInclude("linux/mman.h");
+    @cInclude("capstone/capstone.h");
 });
+
+const CSErrors = error{FailedToDisassemble};
+var CSHandle: c.csh = undefined;
 
 pub fn main() !void {
     const args = try std.process.argsAlloc(std.heap.page_allocator);
@@ -16,6 +20,12 @@ pub fn main() !void {
         return;
     }
     const pid = try std.fmt.parseInt(pid_t, args[1], 10);
+
+    if (c.cs_open(c.CS_ARCH_X86, c.CS_MODE_64, &CSHandle) != c.CS_ERR_OK) {
+        std.log.err("Failed to open Capstone disassembler.", .{});
+        return;
+    }
+    defer _ = c.cs_close(&CSHandle);
 
     // Signal 0 just tests if the process exists
     std.posix.kill(pid, 0) catch |err| {
@@ -71,12 +81,19 @@ fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
     try ptrace(PTRACE.PEEKDATA, pid, orig_regs.rip, @intFromPtr(&inst));
     std.log.debug("Saved current instruction: 0x{x}", .{inst});
 
+    disassemble(&std.mem.toBytes(inst), orig_regs.rip) catch |err| {
+        std.log.err("{}: {x}", .{ err, inst });
+    };
+
     std.log.debug("Setting registers: {}", .{regs});
     try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(regs));
 
     // TODO: Cross-platform syscall support
     const syscallInst: u16 = 0x050f;
     std.log.debug("Writing syscall instruction: 0x{x}", .{syscallInst});
+    disassemble(&std.mem.toBytes(syscallInst), orig_regs.rip) catch |err| {
+        std.log.err("{}: {x}", .{ err, syscallInst });
+    };
     try ptrace(PTRACE.POKEDATA, pid, orig_regs.rip, syscallInst);
 
     std.log.debug("Executing syscall...", .{});
@@ -91,6 +108,21 @@ fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
 
     std.log.debug("Restoring original registers: {}", .{orig_regs});
     try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&orig_regs));
+}
+
+// Do I *need* capstone? It does alleviate the need to write disassemblers for various platforms.
+// Being able to disassemble arbitrary chunks of memory at runtime would be handy.
+fn disassemble(code: []const u8, address: usize) CSErrors!void {
+    var insn: [*c]c.cs_insn = undefined;
+    const count = c.cs_disasm(CSHandle, @ptrCast(&code), code.len, address, 0, &insn);
+    defer c.cs_free(insn, count);
+    if (count > 0) {
+        for (0..count) |i| {
+            std.log.debug("0x{x}:\t{s}\t{s}", .{ insn[i].address, insn[i].mnemonic, insn[i].op_str });
+        }
+    } else {
+        return CSErrors.FailedToDisassemble;
+    }
 }
 
 test "create rwx page with mmap" {
