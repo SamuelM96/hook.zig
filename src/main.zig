@@ -194,6 +194,33 @@ fn getMinimumMapAddr() !usize {
 }
 
 test "create rwx page with mmap" {
-    // TODO: Add tests
-    // Hmmm, what would be the best way to do this... Integration tests with sample programs?
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+
+    if (c.cs_open(c.CS_ARCH_X86, c.CS_MODE_64, &CSHandle) != c.CS_ERR_OK) {
+        std.log.err("Failed to open Capstone disassembler.", .{});
+        return;
+    }
+    defer _ = c.cs_close(&CSHandle);
+
+    var target = std.process.Child.init(&.{
+        "./zig-out/bin/basic-print-loop",
+    }, allocator);
+
+    try target.spawn();
+    std.log.info("PID: {}", .{target.id});
+
+    try attach(target.id);
+
+    // TODO: Calculate entry, or at least a good point to hook from
+    const entry = 0x1001540;
+    try breakUntil(target.id, entry);
+
+    const rxw_page = try injectMmap(target.id, 0, std.mem.page_size, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
+    std.log.info("RWX Page: 0x{x}", .{rxw_page});
+
+    try std.testing.expect(rxw_page >= try getMinimumMapAddr());
+
+    try detach(target.id);
+    _ = target.kill() catch {};
 }
