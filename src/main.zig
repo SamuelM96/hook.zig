@@ -72,6 +72,8 @@ inline fn injectMmap(pid: pid_t, addr: usize, length: usize, prot: i64, flags: i
     regs.r8 = @bitCast(fd);
     regs.r9 = offset;
 
+    std.log.debug("mmap registers: {}", .{regs});
+
     try injectSyscall(pid, &regs);
 
     return regs.rax;
@@ -85,9 +87,11 @@ fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
     var inst: usize = undefined;
     try ptrace(PTRACE.PEEKDATA, pid, orig_regs.rip, @intFromPtr(&inst));
     std.log.debug("Saved current instruction: 0x{x}", .{inst});
-
-    disassemble(&std.mem.toBytes(inst), orig_regs.rip) catch |err| {
-        std.log.err("{}: {x}", .{ err, inst });
+    std.log.debug("Disassembling: 0x{x}", .{inst});
+    var code = std.mem.toBytes(inst);
+    std.mem.byteSwapAllFields([code.len]u8, &code);
+    disassemble(&code, orig_regs.rip) catch |err| {
+        std.log.debug("Error: {}: 0x{x}", .{ err, inst });
     };
 
     std.log.debug("Setting registers: {}", .{regs});
@@ -96,10 +100,7 @@ fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
     // TODO: Cross-platform syscall support
     const syscallInst: u16 = 0x050f;
     std.log.debug("Writing syscall instruction: 0x{x}", .{syscallInst});
-    disassemble(&std.mem.toBytes(syscallInst), orig_regs.rip) catch |err| {
-        std.log.err("{}: {x}", .{ err, syscallInst });
-    };
-    try ptrace(PTRACE.POKEDATA, pid, orig_regs.rip, syscallInst);
+    try ptrace(PTRACE.POKEDATA, pid, regs.rip, syscallInst);
 
     std.log.debug("Executing syscall...", .{});
     try ptrace(PTRACE.SINGLESTEP, pid, 0, 0);
@@ -113,6 +114,7 @@ fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
 
     std.log.debug("Getting register data...", .{});
     try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(regs));
+    std.log.debug("Data: {}", .{regs});
 
     std.log.debug("Restoring original instruction: 0x{x}", .{inst});
     try ptrace(PTRACE.POKEDATA, pid, orig_regs.rip, inst);
