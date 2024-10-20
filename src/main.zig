@@ -295,37 +295,46 @@ fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !
     return lib_handle;
 }
 
-test "create rwx page with mmap" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-
+fn setupTest(allocator: std.mem.Allocator) !std.process.Child {
     if (c.cs_open(c.CS_ARCH_X86, c.CS_MODE_64, &CSHandle) != c.CS_ERR_OK) {
         std.log.err("Failed to open Capstone disassembler.", .{});
-        return;
+        return error.CapstoneSetupFail;
     }
-    defer _ = c.cs_close(&CSHandle);
 
     const filepath = try std.fs.realpathAlloc(allocator, "./zig-out/bin/basic-print-loop");
     defer allocator.free(filepath);
-    std.log.debug("Getting entry addresss...", .{});
     const entry = try getEntryFromFile(allocator, filepath);
-    std.log.info("Entry: 0x{x}", .{entry});
 
     var target = std.process.Child.init(&.{
         filepath,
     }, allocator);
 
     try target.spawn();
-    std.log.info("PID: {}", .{target.id});
-
     try attach(target.id);
     try continueUntil(target.id, entry);
+
+    return target;
+}
+
+fn cleanupTest(target: *std.process.Child) !void {
+    std.log.debug("Closing capstone...", .{});
+    _ = c.cs_close(&CSHandle);
+    std.log.debug("Continuing target {d}...", .{target.id});
+    try ptrace(PTRACE.CONT, target.id, 0, 0);
+    try detach(target.id);
+    std.log.debug("Killing target {d}...", .{target.id});
+    _ = try target.kill();
+}
+
+test "create rwx page with mmap" {
+    const allocator = std.testing.allocator;
+    var target = try setupTest(allocator);
 
     const rxw_page = try injectMmap(target.id, 0, std.mem.page_size, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
     std.log.info("RWX Page: 0x{x}", .{rxw_page});
 
     try std.testing.expect(rxw_page >= try getMinimumMapAddr());
 
-    try detach(target.id);
-    _ = target.kill() catch {};
+    try cleanupTest(&target);
 }
+
