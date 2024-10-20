@@ -338,3 +338,12 @@ test "create rwx page with mmap" {
     try cleanupTest(&target);
 }
 
+// FIX: I don't know why, but sometimes tests will just hang. Running the same code outside a test case works...
+test "load shared object with dlopen()" {
+    const allocator = std.testing.allocator;
+    var target = try setupTest(allocator);
+
+    _ = try loadLibrary(allocator, target.id, "./zig-out/lib/libpic-hello.so");
+
+    try cleanupTest(&target);
+}
