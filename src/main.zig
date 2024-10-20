@@ -19,7 +19,8 @@ pub fn main() !void {
 
     const args = try std.process.argsAlloc(allocator);
     if (args.len != 2) {
-        std.log.err("usage: {s} <pid>", .{args[0]});
+        const prog = std.fs.path.basename(args[0]);
+        std.log.err("usage: {s} <pid> <library>", .{prog});
         return;
     }
     const pid = try std.fmt.parseInt(pid_t, args[1], 10);
