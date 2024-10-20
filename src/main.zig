@@ -175,20 +175,27 @@ fn baseAddress(allocator: std.mem.Allocator, pid: pid_t, filename: []const u8) !
 
 // TODO: Conditional breakpoints
 // TODO: Track breakpoints in their own data structure so they can be configured at any point without continuing directly to them
-fn breakUntil(pid: pid_t, addr: usize) !void {
+fn continueUntil(pid: pid_t, addr: usize) !void {
     var inst: u16 = undefined;
     std.log.debug("Patching 0x{x} with a breakpoint...", .{addr});
     try ptrace(PTRACE.PEEKDATA, pid, addr, @intFromPtr(&inst));
     try ptrace(PTRACE.POKEDATA, pid, addr, 0xCC);
 
     std.log.debug("Continuing until breakpoint @ 0x{x}...", .{addr});
-    // FIX: I should probably feed the signals I don't care about back to the target to handle
+    var signal = c.SIGCONT;
     while (true) {
-        try ptrace(PTRACE.CONT, pid, 0, 0);
+        try ptrace(PTRACE.CONT, pid, 0, @intCast(signal));
         const result = std.posix.waitpid(pid, 0);
-        const signal = c.WSTOPSIG(@as(c_int, @intCast(result.status)));
+        const sig_int = @as(c_int, @intCast(result.status));
+        signal = c.WSTOPSIG(sig_int);
         if (c.WIFSTOPPED(result.status) and signal == c.SIGTRAP) {
             break;
+        } else if (c.WIFSIGNALED(result.status)) {
+            std.log.err("Process {d} terminated due to signal {d}", .{ pid, c.WTERMSIG(sig_int) });
+            std.posix.exit(1);
+        } else if (c.WIFEXITED(result.status)) {
+            std.log.err("Process {d} exited with status {d}", .{ pid, c.WEXITSTATUS(sig_int) });
+            std.posix.exit(1);
         }
     }
 
@@ -260,7 +267,7 @@ test "create rwx page with mmap" {
     std.log.info("PID: {}", .{target.id});
 
     try attach(target.id);
-    try breakUntil(target.id, entry);
+    try continueUntil(target.id, entry);
 
     const rxw_page = try injectMmap(target.id, 0, std.mem.page_size, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
     std.log.info("RWX Page: 0x{x}", .{rxw_page});
