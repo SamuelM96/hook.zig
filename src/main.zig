@@ -5,6 +5,7 @@ const ptrace = std.posix.ptrace;
 const pid_t = std.os.linux.pid_t;
 const c = @cImport({
     // Should I just convert these to Zig? What about cross-platform support?
+    @cInclude("dlfcn.h");
     @cInclude("sys/user.h");
     @cInclude("sys/wait.h");
     @cInclude("linux/mman.h");
@@ -18,12 +19,14 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     const args = try std.process.argsAlloc(allocator);
-    if (args.len != 2) {
+    if (args.len != 3) {
         const prog = std.fs.path.basename(args[0]);
         std.log.err("usage: {s} <pid> <library>", .{prog});
         return;
     }
     const pid = try std.fmt.parseInt(pid_t, args[1], 10);
+    const lib_path = try std.fs.path.resolve(allocator, &.{args[2]});
+    defer allocator.free(lib_path);
 
     if (c.cs_open(c.CS_ARCH_X86, c.CS_MODE_64, &CSHandle) != c.CS_ERR_OK) {
         std.log.err("Failed to open Capstone disassembler.", .{});
@@ -46,10 +49,16 @@ pub fn main() !void {
     const entry = try getEntryFromMemory(allocator, pid);
     std.log.info("Entry: 0x{x}", .{entry});
 
-    const rxw_page = try injectMmap(pid, 0, std.mem.page_size, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
-    std.log.info("RWX @ 0x{x}", .{rxw_page});
+    const lib_handle = try loadLibrary(allocator, pid, lib_path);
+    std.log.info("Obtained handle: 0x{x}", .{lib_handle});
 
-    // TODO: Load a PIC shared object into memory and have the target jump to it
+    // TODO: Call dlclose() on loaded library handle
+}
+
+inline fn writeData(pid: pid_t, addr: usize, data: []const u8) !void {
+    for (0..data.len, data) |i, datum| {
+        try ptrace(PTRACE.POKEDATA, pid, addr + i, datum);
+    }
 }
 
 inline fn attach(pid: pid_t) !void {
@@ -243,6 +252,48 @@ fn getEntryFromMemory(allocator: std.mem.Allocator, pid: pid_t) !usize {
         @memcpy(@as([*]u8, @ptrCast(&header)) + i, &std.mem.toBytes(data));
     }
     return header.e_entry;
+}
+
+fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !usize {
+    const rwx_area = try injectMmap(pid, 0, lib_path.len + 1, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
+    std.log.debug("Obtained RWX memory @ 0x{x}", .{rwx_area});
+
+    std.log.debug("Writing path of library to inject into process...", .{});
+    try writeData(pid, rwx_area, lib_path);
+
+    var orig_regs: c.user_regs_struct = undefined;
+    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&orig_regs));
+    var regs = orig_regs;
+
+    regs.rax = 0;
+    regs.rdi = rwx_area;
+    regs.rsi = c.RTLD_NOW;
+
+    const libc_addr = try baseAddress(allocator, pid, "libc");
+    const dlopen_offset = 0x93300; // TODO: Get dlopen offset at runtime
+    const dlopen_addr = libc_addr + dlopen_offset;
+    regs.rip = dlopen_addr;
+    std.log.debug("dlopen() address found: 0x{x}", .{dlopen_addr});
+
+    std.log.debug("Setting return address to 0x{x}...", .{orig_regs.rip});
+    regs.rsp -= 256;
+    try ptrace(PTRACE.POKEDATA, pid, regs.rsp, orig_regs.rip);
+
+    std.log.debug("Forcing dlopen() call to load {s}...", .{lib_path});
+    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
+    try continueUntil(pid, orig_regs.rip);
+
+    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
+    const lib_handle: usize = @intCast(regs.rax);
+    if (lib_handle == 0) {
+        std.log.err("Failed to obtain handle for {s}", .{lib_path});
+        std.posix.exit(1);
+    }
+
+    std.log.debug("Restoring previous state...", .{});
+    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&orig_regs));
+
+    return lib_handle;
 }
 
 test "create rwx page with mmap" {

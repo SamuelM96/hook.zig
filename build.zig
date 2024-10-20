@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe.linkSystemLibrary("dl");
     exe.linkSystemLibrary("capstone");
     exe.linkLibC();
     b.installArtifact(exe);
@@ -29,6 +30,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe_unit_tests.linkSystemLibrary("dl");
     exe_unit_tests.linkSystemLibrary("capstone");
     exe_unit_tests.linkLibC();
 
@@ -38,11 +40,11 @@ pub fn build(b: *std.Build) void {
 
     const run_exe_integration_tests = b.addRunArtifact(exe_unit_tests);
 
-    const c_tests = [_][]const u8{
+    const c_exe_tests = [_][]const u8{
         "basic-print-loop",
     };
 
-    inline for (c_tests) |test_name| {
+    inline for (c_exe_tests) |test_name| {
         const c_test = b.addExecutable(.{
             .name = test_name,
             .target = target,
@@ -50,6 +52,22 @@ pub fn build(b: *std.Build) void {
         });
         const file = std.fmt.comptimePrint("tests/{s}.c", .{test_name});
         c_test.addCSourceFile(.{ .file = .{ .cwd_relative = file }, .flags = &[_][]const u8{"-std=c99"} });
+        c_test.linkLibC();
+        run_exe_integration_tests.step.dependOn(&b.addInstallArtifact(c_test, .{}).step);
+    }
+
+    const c_lib_tests = [_][]const u8{
+        "pic-hello",
+    };
+
+    inline for (c_lib_tests) |test_name| {
+        const c_test = b.addSharedLibrary(.{
+            .name = test_name,
+            .target = target,
+            .optimize = optimize,
+        });
+        const file = std.fmt.comptimePrint("tests/{s}.c", .{test_name});
+        c_test.addCSourceFile(.{ .file = .{ .cwd_relative = file }, .flags = &[_][]const u8{ "-std=c99", "-fPIC" } });
         c_test.linkLibC();
         run_exe_integration_tests.step.dependOn(&b.addInstallArtifact(c_test, .{}).step);
     }
