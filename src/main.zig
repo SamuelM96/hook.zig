@@ -176,7 +176,7 @@ fn baseAddress(allocator: std.mem.Allocator, pid: pid_t, filename: []const u8) !
 // TODO: Conditional breakpoints
 // TODO: Track breakpoints in their own data structure so they can be configured at any point without continuing directly to them
 fn continueUntil(pid: pid_t, addr: usize) !void {
-    var inst: u16 = undefined;
+    var inst: usize = undefined;
     std.log.debug("Patching 0x{x} with a breakpoint...", .{addr});
     try ptrace(PTRACE.PEEKDATA, pid, addr, @intFromPtr(&inst));
     try ptrace(PTRACE.POKEDATA, pid, addr, 0xCC);
@@ -191,6 +191,7 @@ fn continueUntil(pid: pid_t, addr: usize) !void {
         if (c.WIFSTOPPED(result.status) and signal == c.SIGTRAP) {
             break;
         } else if (c.WIFSIGNALED(result.status)) {
+            // TODO: Provide a debug dump when the target exits unintentionally
             std.log.err("Process {d} terminated due to signal {d}", .{ pid, c.WTERMSIG(sig_int) });
             std.posix.exit(1);
         } else if (c.WIFEXITED(result.status)) {
