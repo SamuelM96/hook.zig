@@ -30,7 +30,7 @@ pub fn main() !void {
 
     if (c.cs_open(c.CS_ARCH_X86, c.CS_MODE_64, &CSHandle) != c.CS_ERR_OK) {
         std.log.err("Failed to open Capstone disassembler.", .{});
-        return;
+        return error.CapstoneSetupFail;
     }
     defer _ = c.cs_close(&CSHandle);
 
@@ -286,8 +286,7 @@ fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !
     try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
     const lib_handle: usize = @intCast(regs.rax);
     if (lib_handle == 0) {
-        std.log.err("Failed to obtain handle for {s}", .{lib_path});
-        std.posix.exit(1);
+        return error.InvalidLibraryHandle;
     }
 
     std.log.debug("Restoring previous state...", .{});
