@@ -49,10 +49,26 @@ pub fn main() !void {
     const base = try baseAddress(allocator, pid, "");
     std.log.info("Base: 0x{x}", .{base});
 
-    const lib_handle = try loadLibrary(allocator, pid, lib_path);
-    std.log.info("Obtained handle: 0x{x}", .{lib_handle});
     const header = try getELFHeaderFromMemory(pid, base);
     std.log.info("Entry: 0x{x}", .{header.entry});
+
+    // e_shoff is often the last part of the header, and so can be used to calculate the total size
+    // HACK: Technically this is not guaranteed, so worth adding a check and adding the option to determine from the maps file.
+    // Matches the result of `ls -l` for now, soooo...
+    const elf_size = header.shoff + (header.shentsize * header.shnum);
+    std.log.info("ELF size: {d}", .{elf_size});
+
+    const exe_path = try getPathForRegion(allocator, pid, base);
+    std.log.info("Path: {s}", .{exe_path});
+
+    const exe_file = try std.fs.openFileAbsolute(exe_path, .{});
+    const raw = try exe_file.readToEndAlloc(allocator, std.math.maxInt(usize));
+
+    const main_offset = try getFunctionOffset(header, raw, "main");
+    std.log.info("Located main @ 0x{x}", .{main_offset});
+
+    // const lib_handle = try loadLibrary(allocator, pid, lib_path);
+    // std.log.info("Obtained handle: 0x{x}", .{lib_handle});
 
     // TODO: Call dlclose() on loaded library handle
 }
@@ -241,6 +257,33 @@ fn getMappedRegion(allocator: std.mem.Allocator, pid: pid_t, filename: []const u
     return region;
 }
 
+fn getPathForRegion(allocator: std.mem.Allocator, pid: pid_t, base: usize) ![]u8 {
+    const maps_path = try std.fmt.allocPrint(allocator, "/proc/{d}/maps", .{pid});
+    defer allocator.free(maps_path);
+
+    const file = try std.fs.openFileAbsolute(maps_path, .{});
+    defer file.close();
+
+    var reader = std.io.bufferedReader(file.reader());
+    var stream = reader.reader();
+    var buf: [1024]u8 = undefined;
+
+    while (try stream.readUntilDelimiterOrEof(&buf, '\n')) |line| {
+        const dash_index = std.mem.indexOfScalar(u8, line, '-') orelse return error.InvalidMapsFile;
+        const region_base: usize = try std.fmt.parseInt(usize, line[0..dash_index], 16);
+        if (base == 0 or base == region_base) {
+            var exe_path: ?[]const u8 = null;
+            var iter = std.mem.splitScalar(u8, line, ' ');
+            while (iter.next()) |data| {
+                exe_path = data;
+            }
+            return allocator.dupe(u8, exe_path orelse return error.NotFoundInMapsFile);
+        }
+    }
+
+    return error.NotFoundInMapsFile;
+}
+
 // TODO: Conditional breakpoints
 // TODO: Track breakpoints in their own data structure so they can be configured at any point without continuing directly to them
 fn continueUntil(pid: pid_t, addr: usize) !void {
@@ -350,6 +393,53 @@ fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !
     return lib_handle;
 }
 
+fn getFunctionOffset(header: std.elf.Header, elf_file: []const u8, func_name: []const u8) !usize {
+    std.log.debug("Getting offset for {s}...", .{func_name});
+    var stream = std.io.fixedBufferStream(elf_file);
+    var iter = header.section_header_iterator(&stream);
+    var symtab_shdr: ?std.elf.Elf64_Shdr = null;
+    var strtab_shdr: ?std.elf.Elf64_Shdr = null;
+    while (try iter.next()) |shdr| {
+        if (shdr.sh_type == std.elf.SHT_SYMTAB) {
+            symtab_shdr = shdr;
+        }
+
+        if (shdr.sh_type == std.elf.SHT_STRTAB) {
+            strtab_shdr = shdr;
+        }
+    }
+
+    if (symtab_shdr == null) {
+        return error.SymtabNotFound;
+    } else if (strtab_shdr == null) {
+        return error.StrtabNotFound;
+    }
+
+    std.log.info("Symtab: {?}", .{symtab_shdr});
+    std.log.info("Strtab: {?}", .{strtab_shdr});
+
+    const symtab_end = symtab_shdr.?.sh_offset + symtab_shdr.?.sh_size;
+    const symtab = elf_file[symtab_shdr.?.sh_offset..symtab_end];
+
+    const strtab_end = strtab_shdr.?.sh_offset + strtab_shdr.?.sh_size;
+    const strtab = elf_file[strtab_shdr.?.sh_offset..strtab_end];
+
+    const len = symtab_shdr.?.sh_size / @sizeOf(std.elf.Elf64_Sym);
+    for (0..len) |i| {
+        const offset: usize = i * @sizeOf(std.elf.Elf64_Sym);
+        const sym = @as(*const std.elf.Elf64_Sym, @alignCast(@ptrCast(symtab.ptr + offset)));
+        const name = std.mem.span(@as([*c]const u8, &strtab[sym.st_name]));
+        if (sym.st_type() == std.elf.STT_FUNC) {
+            std.log.debug("Found {s} @ 0x{x}", .{ name, sym.st_value });
+            if (std.mem.eql(u8, name, func_name)) {
+                return sym.st_value;
+            }
+        }
+    }
+
+    return error.FuncNotFound;
+}
+
 fn setupTest(allocator: std.mem.Allocator) !std.process.Child {
     if (c.cs_open(c.CS_ARCH_X86, c.CS_MODE_64, &CSHandle) != c.CS_ERR_OK) {
         std.log.err("Failed to open Capstone disassembler.", .{});
@@ -358,7 +448,7 @@ fn setupTest(allocator: std.mem.Allocator) !std.process.Child {
 
     const filepath = try std.fs.realpathAlloc(allocator, "./zig-out/bin/basic-print-loop");
     defer allocator.free(filepath);
-    const entry = try getEntryFromFile(allocator, filepath);
+    const header = try getELFHeaderFromFile(allocator, filepath);
 
     var target = std.process.Child.init(&.{
         filepath,
@@ -366,7 +456,7 @@ fn setupTest(allocator: std.mem.Allocator) !std.process.Child {
 
     try target.spawn();
     try attach(target.id);
-    try continueUntil(target.id, entry);
+    try continueUntil(target.id, header.entry);
 
     return target;
 }
