@@ -46,11 +46,13 @@ pub fn main() !void {
     try attach(pid);
     defer detach(pid) catch |err| std.log.err("Failed to detach from {d}: {}", .{ pid, err });
 
-    const entry = try getEntryFromMemory(allocator, pid);
-    std.log.info("Entry: 0x{x}", .{entry});
+    const base = try baseAddress(allocator, pid, "");
+    std.log.info("Base: 0x{x}", .{base});
 
     const lib_handle = try loadLibrary(allocator, pid, lib_path);
     std.log.info("Obtained handle: 0x{x}", .{lib_handle});
+    const header = try getELFHeaderFromMemory(pid, base);
+    std.log.info("Entry: 0x{x}", .{header.entry});
 
     // TODO: Call dlclose() on loaded library handle
 }
@@ -280,7 +282,7 @@ fn getMinimumMapAddr() !usize {
     return try std.fmt.parseInt(usize, std.mem.trim(u8, buffer[0..count], &std.ascii.whitespace), 10);
 }
 
-fn getEntryFromFile(allocator: std.mem.Allocator, filepath: []const u8) !usize {
+fn getELFHeaderFromFile(allocator: std.mem.Allocator, filepath: []const u8) !std.elf.Header {
     var file = try std.fs.openFileAbsolute(filepath, .{});
     defer file.close();
 
@@ -288,22 +290,19 @@ fn getEntryFromFile(allocator: std.mem.Allocator, filepath: []const u8) !usize {
     defer allocator.free(raw);
 
     var stream = std.io.fixedBufferStream(raw);
-    const hdr = try std.elf.Header.read(&stream);
-
-    return hdr.entry;
+    return try std.elf.Header.read(&stream);
 }
 
 // TODO: Get other function addresses by parsing ELF files
-fn getEntryFromMemory(allocator: std.mem.Allocator, pid: pid_t) !usize {
+fn getELFHeaderFromMemory(pid: pid_t, base: usize) !std.elf.Header {
     var header: std.elf.Elf64_Ehdr = undefined;
-    const base = try baseAddress(allocator, pid, "");
     var i: usize = 0;
     while (i < @sizeOf(@TypeOf(header))) : (i += @sizeOf(usize)) {
         var data: usize = undefined;
         try ptrace(PTRACE.PEEKDATA, pid, base + i, @intFromPtr(&data));
         @memcpy(@as([*]u8, @ptrCast(&header)) + i, &std.mem.toBytes(data));
     }
-    return header.e_entry;
+    return std.elf.Header.parse(@alignCast(&std.mem.toBytes(header)));
 }
 
 fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !usize {
