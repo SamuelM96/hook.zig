@@ -15,5 +15,5 @@ zig build
 ## Usage
 
 ```bash
-hook.zig <pid>
+hook.zig <pid> <library_to_load>
 ```
