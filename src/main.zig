@@ -55,6 +55,16 @@ pub fn main() !void {
     // TODO: Call dlclose() on loaded library handle
 }
 
+inline fn readData(pid: pid_t, addr: usize, dest: *[]u8) !void {
+    const aligned_size: usize = @intFromFloat(@round(@as(f128, @floatFromInt(dest.len)) / @sizeOf(usize)));
+    for (0..aligned_size) |i| {
+        var datum: usize = undefined;
+        const offset = i * @sizeOf(usize);
+        try ptrace(PTRACE.PEEKDATA, pid, addr + offset, @intFromPtr(&datum));
+        const len = if (dest.len - offset < @sizeOf(usize)) dest.len - offset else @sizeOf(usize);
+        std.mem.copyForwards(u8, dest.*[offset..dest.len], std.mem.toBytes(datum)[0..len]);
+    }
+}
 inline fn writeData(pid: pid_t, addr: usize, data: []const u8) !void {
     for (0..data.len, data) |i, datum| {
         try ptrace(PTRACE.POKEDATA, pid, addr + i, datum);
@@ -181,6 +191,48 @@ fn baseAddress(allocator: std.mem.Allocator, pid: pid_t, filename: []const u8) !
     }
 
     return error.NotFoundInMapsFile;
+}
+
+fn getMappedRegion(allocator: std.mem.Allocator, pid: pid_t, filename: []const u8) ![]u8 {
+    const maps_path = try std.fmt.allocPrint(allocator, "/proc/{d}/maps", .{pid});
+    defer allocator.free(maps_path);
+
+    const file = try std.fs.openFileAbsolute(maps_path, .{});
+    defer file.close();
+
+    var reader = std.io.bufferedReader(file.reader());
+    var stream = reader.reader();
+    var buf: [1024]u8 = undefined;
+
+    var exe_path = filename;
+    var start: usize = 0;
+    var end: usize = 0;
+    while (try stream.readUntilDelimiterOrEof(&buf, '\n')) |line| {
+        if (exe_path.len != 0 and std.mem.indexOf(u8, line, exe_path) == null) {
+            if (end != 0) {
+                break;
+            }
+            continue;
+        }
+
+        var iter = std.mem.splitScalar(u8, line, ' ');
+        const range = iter.next() orelse return error.InvalidMapsFile;
+        const dash_index = std.mem.indexOfScalar(u8, range, '-') orelse return error.InvalidMapsFile;
+        if (exe_path.len == 0) {
+            start = try std.fmt.parseInt(usize, line[0..dash_index], 16);
+            while (iter.next()) |data| {
+                exe_path = data;
+            }
+        }
+        end = try std.fmt.parseInt(usize, line[dash_index + 1 .. range.len], 16);
+    }
+
+    std.log.info("{s} : 0x{x} - 0x{x}", .{ exe_path, start, end });
+    const total_size = end - start;
+    var region = try allocator.alloc(u8, total_size);
+    try readData(pid, start, &region);
+
+    return region;
 }
 
 // TODO: Conditional breakpoints
