@@ -46,7 +46,7 @@ pub fn main() !void {
     try attach(pid);
     defer detach(pid) catch |err| std.log.err("Failed to detach from {d}: {}", .{ pid, err });
 
-    const base = try baseAddress(allocator, pid, "");
+    const base = try baseAddress(allocator, pid, "libc");
     std.log.info("Base: 0x{x}", .{base});
 
     const header = try getELFHeaderFromMemory(pid, base);
@@ -64,12 +64,14 @@ pub fn main() !void {
     const exe_file = try std.fs.openFileAbsolute(exe_path, .{});
     const raw = try exe_file.readToEndAlloc(allocator, std.math.maxInt(usize));
 
-    const main_offset = try getFunctionOffset(header, raw, "main");
-    std.log.info("Located main @ 0x{x}", .{main_offset});
+    const func = "dlopen@@GLIBC_2.34";
+    const main_offset = try getFunctionOffset(header, raw, func);
+    std.log.info("Located {s} @ 0x{x}", .{ func, main_offset });
 
     // const lib_handle = try loadLibrary(allocator, pid, lib_path);
     // std.log.info("Obtained handle: 0x{x}", .{lib_handle});
 
+    // TODO: Abstract out function calling
     // TODO: Call dlclose() on loaded library handle
 }
 
@@ -399,14 +401,20 @@ fn getFunctionOffset(header: std.elf.Header, elf_file: []const u8, func_name: []
     var iter = header.section_header_iterator(&stream);
     var symtab_shdr: ?std.elf.Elf64_Shdr = null;
     var strtab_shdr: ?std.elf.Elf64_Shdr = null;
+    var idx: usize = 0;
     while (try iter.next()) |shdr| {
         if (shdr.sh_type == std.elf.SHT_SYMTAB) {
+            std.log.debug("[{d}] Got .symtab @ 0x{x}", .{ idx, shdr.sh_offset });
             symtab_shdr = shdr;
         }
 
-        if (shdr.sh_type == std.elf.SHT_STRTAB) {
+        // HACK: Will strtab always be after symtab?
+        if (shdr.sh_type == std.elf.SHT_STRTAB and symtab_shdr != null and idx == symtab_shdr.?.sh_link) {
+            std.log.debug("[{d}] Got .strstab @ 0x{x}", .{ idx, shdr.sh_offset });
             strtab_shdr = shdr;
         }
+
+        idx += 1;
     }
 
     if (symtab_shdr == null) {
@@ -414,9 +422,6 @@ fn getFunctionOffset(header: std.elf.Header, elf_file: []const u8, func_name: []
     } else if (strtab_shdr == null) {
         return error.StrtabNotFound;
     }
-
-    std.log.info("Symtab: {?}", .{symtab_shdr});
-    std.log.info("Strtab: {?}", .{strtab_shdr});
 
     const symtab_end = symtab_shdr.?.sh_offset + symtab_shdr.?.sh_size;
     const symtab = elf_file[symtab_shdr.?.sh_offset..symtab_end];
@@ -430,7 +435,7 @@ fn getFunctionOffset(header: std.elf.Header, elf_file: []const u8, func_name: []
         const sym = @as(*const std.elf.Elf64_Sym, @alignCast(@ptrCast(symtab.ptr + offset)));
         const name = std.mem.span(@as([*c]const u8, &strtab[sym.st_name]));
         if (sym.st_type() == std.elf.STT_FUNC) {
-            std.log.debug("Found {s} @ 0x{x}", .{ name, sym.st_value });
+            // std.log.debug("{d}: Found {s} @ 0x{x}: {?}", .{ i, name, sym.st_value, sym });
             if (std.mem.eql(u8, name, func_name)) {
                 return sym.st_value;
             }
