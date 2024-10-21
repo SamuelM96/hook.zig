@@ -229,6 +229,10 @@ fn getMappedRegion(allocator: std.mem.Allocator, pid: pid_t, filename: []const u
         end = try std.fmt.parseInt(usize, line[dash_index + 1 .. range.len], 16);
     }
 
+    if (end == 0) {
+        return error.NotFoundInMapsFile;
+    }
+
     std.log.info("{s} : 0x{x} - 0x{x}", .{ exe_path, start, end });
     const total_size = end - start;
     var region = try allocator.alloc(u8, total_size);
