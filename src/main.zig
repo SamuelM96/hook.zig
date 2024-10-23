@@ -1,4 +1,5 @@
 const std = @import("std");
+const elf = std.elf;
 const PTRACE = std.os.linux.PTRACE;
 const PROT = std.posix.PROT;
 const ptrace = std.posix.ptrace;
@@ -124,6 +125,18 @@ inline fn injectMmap(pid: pid_t, addr: usize, length: usize, prot: i64, flags: i
     return regs.rax;
 }
 
+test "create rwx page with mmap" {
+    const allocator = std.testing.allocator;
+    var target = try setupTest(allocator);
+
+    const rxw_page = try injectMmap(target.id, 0, std.mem.page_size, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
+    std.log.info("RWX Page: 0x{x}", .{rxw_page});
+
+    try std.testing.expect(rxw_page >= try getMinimumMapAddr());
+
+    try cleanupTest(&target);
+}
+
 fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
     // HACK: Technically this save/restore logic could be made into an inline wrapper or similar
     // I'll wait until the code gets more complex to avoid premature optimisaton.
@@ -185,7 +198,110 @@ fn disassemble(code: []const u8, address: usize) !void {
     }
 }
 
-fn baseAddress(allocator: std.mem.Allocator, pid: pid_t, filename: []const u8) !usize {
+// TODO: Conditional breakpoints
+// TODO: Track breakpoints in their own data structure so they can be configured at any point without continuing directly to them
+fn continueUntil(pid: pid_t, addr: usize) !void {
+    var inst: usize = undefined;
+    std.log.debug("Patching 0x{x} with a breakpoint...", .{addr});
+    try ptrace(PTRACE.PEEKDATA, pid, addr, @intFromPtr(&inst));
+    try ptrace(PTRACE.POKEDATA, pid, addr, 0xCC);
+
+    std.log.debug("Continuing until breakpoint @ 0x{x}...", .{addr});
+    var signal = c.SIGCONT;
+    while (true) {
+        try ptrace(PTRACE.CONT, pid, 0, @intCast(signal));
+        const result = std.posix.waitpid(pid, 0);
+        const sig_int = @as(c_int, @intCast(result.status));
+        signal = c.WSTOPSIG(sig_int);
+        if (c.WIFSTOPPED(result.status) and signal == c.SIGTRAP) {
+            break;
+        } else if (c.WIFSIGNALED(result.status)) {
+            // TODO: Provide a debug dump when the target exits unintentionally
+            std.log.err("Process {d} terminated due to signal {d}", .{ pid, c.WTERMSIG(sig_int) });
+            std.posix.exit(1);
+        } else if (c.WIFEXITED(result.status)) {
+            std.log.err("Process {d} exited with status {d}", .{ pid, c.WEXITSTATUS(sig_int) });
+            std.posix.exit(1);
+        }
+    }
+
+    var regs = try getRegs(pid);
+    std.log.debug("Hit breakpoint @ 0x{x}...", .{regs.rip});
+    std.log.debug("Restoring previous instruction 0x{x}...", .{inst});
+    regs.rip -= 1;
+    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
+    try ptrace(PTRACE.POKEDATA, pid, addr, inst);
+    return;
+}
+
+fn execFunc(pid: pid_t, addr: usize, args: []const usize) !usize {
+    var orig_regs = try getRegs(pid);
+    var regs = orig_regs;
+    regs.rip = addr;
+    regs.rax = 0;
+
+    std.log.debug("Setting return address to 0x{x}...", .{orig_regs.rip});
+    regs.rsp = orig_regs.rsp - 256;
+    try ptrace(PTRACE.POKEDATA, pid, regs.rsp, orig_regs.rip);
+
+    for (0..args.len, args) |i, arg| {
+        // TODO: Support other ABIs
+        switch (i) {
+            0 => regs.rdi = arg,
+            1 => regs.rsi = arg,
+            2 => regs.rdx = arg,
+            3 => regs.rcx = arg,
+            4 => regs.r8 = arg,
+            5 => regs.r9 = arg,
+            else => {
+                regs.rsp -= @sizeOf(usize);
+                try ptrace(PTRACE.POKEDATA, pid, regs.rsp, arg);
+            },
+        }
+    }
+
+    std.log.debug("Calling function @ 0x{x}...", .{addr});
+    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
+    try continueUntil(pid, orig_regs.rip);
+
+    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
+    const ret: usize = @intCast(regs.rax);
+
+    std.log.debug("Restoring previous state...", .{});
+    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&orig_regs));
+
+    return ret;
+}
+
+fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !usize {
+    const rwx_area = try injectMmap(pid, 0, lib_path.len + 1, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
+    std.log.debug("Obtained RWX memory @ 0x{x}", .{rwx_area});
+
+    std.log.debug("Writing path of library to inject into process...", .{});
+    try writeData(pid, rwx_area, lib_path);
+
+    const dlopen_name = "dlopen@@GLIBC_2.34";
+    const dlopen_addr = try getFuncFrom(allocator, pid, "libc", dlopen_name);
+
+    const lib_handle: usize = try execFunc(pid, dlopen_addr, &[_]usize{ rwx_area, c.RTLD_NOW });
+    if (lib_handle == 0) {
+        return error.InvalidLibraryHandle;
+    }
+
+    return lib_handle;
+}
+
+// FIX: I don't know why, but sometimes tests will just hang. Running the same code outside a test case works...
+test "load shared object with dlopen()" {
+    const allocator = std.testing.allocator;
+    var target = try setupTest(allocator);
+
+    _ = try loadLibrary(allocator, target.id, "./zig-out/lib/libpic-hello.so");
+
+    try cleanupTest(&target);
+}
+
+fn getBaseAddress(allocator: std.mem.Allocator, pid: pid_t, filename: []const u8) !usize {
     const maps_path = try std.fmt.allocPrint(allocator, "/proc/{d}/maps", .{pid});
     defer allocator.free(maps_path);
 
@@ -280,42 +396,6 @@ fn getPathForRegion(allocator: std.mem.Allocator, pid: pid_t, base: usize) ![]u8
     return error.NotFoundInMapsFile;
 }
 
-// TODO: Conditional breakpoints
-// TODO: Track breakpoints in their own data structure so they can be configured at any point without continuing directly to them
-fn continueUntil(pid: pid_t, addr: usize) !void {
-    var inst: usize = undefined;
-    std.log.debug("Patching 0x{x} with a breakpoint...", .{addr});
-    try ptrace(PTRACE.PEEKDATA, pid, addr, @intFromPtr(&inst));
-    try ptrace(PTRACE.POKEDATA, pid, addr, 0xCC);
-
-    std.log.debug("Continuing until breakpoint @ 0x{x}...", .{addr});
-    var signal = c.SIGCONT;
-    while (true) {
-        try ptrace(PTRACE.CONT, pid, 0, @intCast(signal));
-        const result = std.posix.waitpid(pid, 0);
-        const sig_int = @as(c_int, @intCast(result.status));
-        signal = c.WSTOPSIG(sig_int);
-        if (c.WIFSTOPPED(result.status) and signal == c.SIGTRAP) {
-            break;
-        } else if (c.WIFSIGNALED(result.status)) {
-            // TODO: Provide a debug dump when the target exits unintentionally
-            std.log.err("Process {d} terminated due to signal {d}", .{ pid, c.WTERMSIG(sig_int) });
-            std.posix.exit(1);
-        } else if (c.WIFEXITED(result.status)) {
-            std.log.err("Process {d} exited with status {d}", .{ pid, c.WEXITSTATUS(sig_int) });
-            std.posix.exit(1);
-        }
-    }
-
-    var regs = try getRegs(pid);
-    std.log.debug("Hit breakpoint @ 0x{x}...", .{regs.rip});
-    std.log.debug("Restoring previous instruction 0x{x}...", .{inst});
-    regs.rip -= 1;
-    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
-    try ptrace(PTRACE.POKEDATA, pid, addr, inst);
-    return;
-}
-
 fn getMinimumMapAddr() !usize {
     const mmap_min_addr_file = try std.fs.openFileAbsolute("/proc/sys/vm/mmap_min_addr", .{});
     defer mmap_min_addr_file.close();
@@ -324,7 +404,7 @@ fn getMinimumMapAddr() !usize {
     return try std.fmt.parseInt(usize, std.mem.trim(u8, buffer[0..count], &std.ascii.whitespace), 10);
 }
 
-fn getELFHeaderFromFile(allocator: std.mem.Allocator, filepath: []const u8) !std.elf.Header {
+fn getELFHeaderFromFile(allocator: std.mem.Allocator, filepath: []const u8) !elf.Header {
     var file = try std.fs.openFileAbsolute(filepath, .{});
     defer file.close();
 
@@ -332,81 +412,24 @@ fn getELFHeaderFromFile(allocator: std.mem.Allocator, filepath: []const u8) !std
     defer allocator.free(raw);
 
     var stream = std.io.fixedBufferStream(raw);
-    return try std.elf.Header.read(&stream);
+    return try elf.Header.read(&stream);
 }
 
-fn getELFHeaderFromRegion(pid: pid_t, base: usize) !std.elf.Header {
-    var header: std.elf.Elf64_Ehdr = undefined;
+fn getELFHeaderFromRegion(pid: pid_t, base: usize) !elf.Header {
+    var header: elf.Elf64_Ehdr = undefined;
     var i: usize = 0;
     while (i < @sizeOf(@TypeOf(header))) : (i += @sizeOf(usize)) {
         var data: usize = undefined;
         try ptrace(PTRACE.PEEKDATA, pid, base + i, @intFromPtr(&data));
         @memcpy(@as([*]u8, @ptrCast(&header)) + i, &std.mem.toBytes(data));
     }
-    return std.elf.Header.parse(@alignCast(&std.mem.toBytes(header)));
-}
-
-fn execFunc(pid: pid_t, addr: usize, args: []const usize) !usize {
-    var orig_regs = try getRegs(pid);
-    var regs = orig_regs;
-    regs.rip = addr;
-    regs.rax = 0;
-
-    std.log.debug("Setting return address to 0x{x}...", .{orig_regs.rip});
-    regs.rsp = orig_regs.rsp - 256;
-    try ptrace(PTRACE.POKEDATA, pid, regs.rsp, orig_regs.rip);
-
-    for (0..args.len, args) |i, arg| {
-        // TODO: Support other ABIs
-        switch (i) {
-            0 => regs.rdi = arg,
-            1 => regs.rsi = arg,
-            2 => regs.rdx = arg,
-            3 => regs.rcx = arg,
-            4 => regs.r8 = arg,
-            5 => regs.r9 = arg,
-            else => {
-                regs.rsp -= @sizeOf(usize);
-                try ptrace(PTRACE.POKEDATA, pid, regs.rsp, arg);
-            },
-        }
-    }
-
-    std.log.debug("Calling function @ 0x{x}...", .{addr});
-    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
-    try continueUntil(pid, orig_regs.rip);
-
-    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
-    const ret: usize = @intCast(regs.rax);
-
-    std.log.debug("Restoring previous state...", .{});
-    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&orig_regs));
-
-    return ret;
-}
-
-fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !usize {
-    const rwx_area = try injectMmap(pid, 0, lib_path.len + 1, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
-    std.log.debug("Obtained RWX memory @ 0x{x}", .{rwx_area});
-
-    std.log.debug("Writing path of library to inject into process...", .{});
-    try writeData(pid, rwx_area, lib_path);
-
-    const dlopen_name = "dlopen@@GLIBC_2.34";
-    const dlopen_addr = try getFuncFrom(allocator, pid, "libc", dlopen_name);
-
-    const lib_handle: usize = try execFunc(pid, dlopen_addr, &[_]usize{ rwx_area, c.RTLD_NOW });
-    if (lib_handle == 0) {
-        return error.InvalidLibraryHandle;
-    }
-
-    return lib_handle;
+    return elf.Header.parse(@alignCast(&std.mem.toBytes(header)));
 }
 
 fn getFuncFrom(allocator: std.mem.Allocator, pid: pid_t, region_name: []const u8, func_name: []const u8) !usize {
     // TODO: Get base addr and path at the same time
     // Maybe just return a hashmap of the maps file? {base: path, ...}
-    const base = try baseAddress(allocator, pid, region_name);
+    const base = try getBaseAddress(allocator, pid, region_name);
     std.log.info("{s} base @ 0x{x}", .{ region_name, base });
 
     const region_path = try getPathForRegion(allocator, pid, base);
@@ -423,23 +446,23 @@ fn getFuncFrom(allocator: std.mem.Allocator, pid: pid_t, region_name: []const u8
 
 fn getFunctionOffset(elf_file: []const u8, func_name: []const u8) !usize {
     // TODO: Support 32 bit ELFs
-    const raw_header = elf_file[0..@sizeOf(std.elf.Elf64_Ehdr)];
-    const header = try std.elf.Header.parse(@ptrCast(@alignCast(raw_header)));
+    const raw_header = elf_file[0..@sizeOf(elf.Elf64_Ehdr)];
+    const header = try elf.Header.parse(@ptrCast(@alignCast(raw_header)));
     std.log.debug("Getting offset for {s}...", .{func_name});
 
     var stream = std.io.fixedBufferStream(elf_file);
     var iter = header.section_header_iterator(&stream);
-    var symtab_shdr: ?std.elf.Elf64_Shdr = null;
-    var strtab_shdr: ?std.elf.Elf64_Shdr = null;
+    var symtab_shdr: ?elf.Elf64_Shdr = null;
+    var strtab_shdr: ?elf.Elf64_Shdr = null;
     var idx: usize = 0;
     while (try iter.next()) |shdr| {
-        if (shdr.sh_type == std.elf.SHT_SYMTAB) {
+        if (shdr.sh_type == elf.SHT_SYMTAB) {
             std.log.debug("[{d}] Got .symtab @ 0x{x}", .{ idx, shdr.sh_offset });
             symtab_shdr = shdr;
         }
 
         // HACK: Will strtab always be after symtab?
-        if (shdr.sh_type == std.elf.SHT_STRTAB and symtab_shdr != null and idx == symtab_shdr.?.sh_link) {
+        if (shdr.sh_type == elf.SHT_STRTAB and symtab_shdr != null and idx == symtab_shdr.?.sh_link) {
             std.log.debug("[{d}] Got .strstab @ 0x{x}", .{ idx, shdr.sh_offset });
             strtab_shdr = shdr;
         }
@@ -459,12 +482,12 @@ fn getFunctionOffset(elf_file: []const u8, func_name: []const u8) !usize {
     const strtab_end = strtab_shdr.?.sh_offset + strtab_shdr.?.sh_size;
     const strtab = elf_file[strtab_shdr.?.sh_offset..strtab_end];
 
-    const len = symtab_shdr.?.sh_size / @sizeOf(std.elf.Elf64_Sym);
+    const len = symtab_shdr.?.sh_size / @sizeOf(elf.Elf64_Sym);
     for (0..len) |i| {
-        const offset: usize = i * @sizeOf(std.elf.Elf64_Sym);
-        const sym = @as(*const std.elf.Elf64_Sym, @alignCast(@ptrCast(symtab.ptr + offset)));
+        const offset: usize = i * @sizeOf(elf.Elf64_Sym);
+        const sym = @as(*const elf.Elf64_Sym, @alignCast(@ptrCast(symtab.ptr + offset)));
         const name = std.mem.span(@as([*c]const u8, &strtab[sym.st_name]));
-        if (sym.st_type() == std.elf.STT_FUNC) {
+        if (sym.st_type() == elf.STT_FUNC) {
             // std.log.debug("{d}: Found {s} @ 0x{x}: {?}", .{ i, name, sym.st_value, sym });
             if (std.mem.eql(u8, name, func_name)) {
                 return sym.st_value;
@@ -473,6 +496,12 @@ fn getFunctionOffset(elf_file: []const u8, func_name: []const u8) !usize {
     }
 
     return error.FuncNotFound;
+}
+
+inline fn getRegs(pid: pid_t) !c.struct_user_regs_struct {
+    var regs: c.user_regs_struct = undefined;
+    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
+    return regs;
 }
 
 fn setupTest(allocator: std.mem.Allocator) !std.process.Child {
@@ -504,32 +533,4 @@ fn cleanupTest(target: *std.process.Child) !void {
     try detach(target.id);
     std.log.debug("Killing target {d}...", .{target.id});
     _ = try target.kill();
-}
-
-test "create rwx page with mmap" {
-    const allocator = std.testing.allocator;
-    var target = try setupTest(allocator);
-
-    const rxw_page = try injectMmap(target.id, 0, std.mem.page_size, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
-    std.log.info("RWX Page: 0x{x}", .{rxw_page});
-
-    try std.testing.expect(rxw_page >= try getMinimumMapAddr());
-
-    try cleanupTest(&target);
-}
-
-inline fn getRegs(pid: pid_t) !c.struct_user_regs_struct {
-    var regs: c.user_regs_struct = undefined;
-    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
-    return regs;
-}
-
-// FIX: I don't know why, but sometimes tests will just hang. Running the same code outside a test case works...
-test "load shared object with dlopen()" {
-    const allocator = std.testing.allocator;
-    var target = try setupTest(allocator);
-
-    _ = try loadLibrary(allocator, target.id, "./zig-out/lib/libpic-hello.so");
-
-    try cleanupTest(&target);
 }
