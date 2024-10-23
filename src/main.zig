@@ -49,15 +49,6 @@ pub fn main() !void {
     const base = try baseAddress(allocator, pid, "libc");
     std.log.info("Base: 0x{x}", .{base});
 
-    const header = try getELFHeaderFromRegion(pid, base);
-    std.log.info("Entry: 0x{x}", .{header.entry});
-
-    // e_shoff is often the last part of the header, and so can be used to calculate the total size
-    // HACK: Technically this is not guaranteed, so worth adding a check and adding the option to determine from the maps file.
-    // Matches the result of `ls -l` for now, soooo...
-    const elf_size = header.shoff + (header.shentsize * header.shnum);
-    std.log.info("ELF size: {d}", .{elf_size});
-
     const region_path = try getPathForRegion(allocator, pid, base);
     std.log.info("Path: {s}", .{region_path});
 
@@ -65,7 +56,7 @@ pub fn main() !void {
     const raw_elf = try region_file.readToEndAlloc(allocator, std.math.maxInt(usize));
 
     const func = "dlopen@@GLIBC_2.34";
-    const func_offset = try getFunctionOffset(header, raw_elf, func);
+    const func_offset = try getFunctionOffset(raw_elf, func);
     const func_addr = base + func_offset;
     std.log.info("Located {s} @ offset 0x{x} (0x{x})", .{ func, func_offset, func_addr });
 
@@ -395,8 +386,12 @@ fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !
     return lib_handle;
 }
 
-fn getFunctionOffset(header: std.elf.Header, elf_file: []const u8, func_name: []const u8) !usize {
+fn getFunctionOffset(elf_file: []const u8, func_name: []const u8) !usize {
+    // TODO: Support 32 bit ELFs
+    const raw_header = elf_file[0..@sizeOf(std.elf.Elf64_Ehdr)];
+    const header = try std.elf.Header.parse(@ptrCast(@alignCast(raw_header)));
     std.log.debug("Getting offset for {s}...", .{func_name});
+
     var stream = std.io.fixedBufferStream(elf_file);
     var iter = header.section_header_iterator(&stream);
     var symtab_shdr: ?std.elf.Elf64_Shdr = null;
