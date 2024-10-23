@@ -88,8 +88,7 @@ inline fn detach(pid: pid_t) !void {
 
 // TODO: Alternative: scan for code caves
 inline fn injectMmap(pid: pid_t, addr: usize, length: usize, prot: i64, flags: i64, fd: i64, offset: usize) !usize {
-    var regs: c.user_regs_struct = undefined;
-    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
+    var regs = try getRegs(pid);
 
     // void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
     regs.rax = 9; // mmap syscall
@@ -110,8 +109,7 @@ inline fn injectMmap(pid: pid_t, addr: usize, length: usize, prot: i64, flags: i
 fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
     // HACK: Technically this save/restore logic would be make into an inline wrapper or similar
     // I'll wait until the code gets more complex to avoid premature optimisaton.
-    var orig_regs: c.user_regs_struct = undefined;
-    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&orig_regs));
+    var orig_regs = try getRegs(pid);
     std.log.debug("Original registers: {}", .{orig_regs});
 
     var inst: usize = undefined;
@@ -291,8 +289,7 @@ fn continueUntil(pid: pid_t, addr: usize) !void {
         }
     }
 
-    var regs: c.user_regs_struct = undefined;
-    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
+    var regs = try getRegs(pid);
     std.log.debug("Hit breakpoint @ 0x{x}...", .{regs.rip});
     std.log.debug("Restoring previous instruction 0x{x}...", .{inst});
     regs.rip -= 1;
@@ -478,6 +475,12 @@ test "create rwx page with mmap" {
     try std.testing.expect(rxw_page >= try getMinimumMapAddr());
 
     try cleanupTest(&target);
+}
+
+inline fn getRegs(pid: pid_t) !c.struct_user_regs_struct {
+    var regs: c.user_regs_struct = undefined;
+    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
+    return regs;
 }
 
 // FIX: I don't know why, but sometimes tests will just hang. Running the same code outside a test case works...
