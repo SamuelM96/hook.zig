@@ -19,14 +19,23 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     const args = try std.process.argsAlloc(allocator);
-    if (args.len != 3) {
+    if (args.len < 4) {
         const prog = std.fs.path.basename(args[0]);
-        std.log.err("usage: {s} <pid> <library>", .{prog});
+        std.log.err("usage: {s} <pid> <library> <func_name> [ARG...]", .{prog});
         return;
     }
     const pid = try std.fmt.parseInt(pid_t, args[1], 10);
     const lib_path = try std.fs.path.resolve(allocator, &.{args[2]});
     defer allocator.free(lib_path);
+    const func_name = args[3];
+
+    var func_args = std.ArrayList(usize).init(allocator);
+    if (args.len > 4) {
+        for (args[4..args.len]) |arg| {
+            // TODO: Support different parameter types
+            try func_args.append(try std.fmt.parseInt(usize, arg, 10));
+        }
+    }
 
     if (c.cs_open(c.CS_ARCH_X86, c.CS_MODE_64, &CSHandle) != c.CS_ERR_OK) {
         std.log.err("Failed to open Capstone disassembler.", .{});
@@ -50,11 +59,9 @@ pub fn main() !void {
     const lib_handle = try loadLibrary(allocator, pid, lib_path);
     std.log.info("Obtained handle for {s}: 0x{x}", .{ lib_path, lib_handle });
 
-    const func_name = "hello";
-    const func_args = [_]usize{};
     const func_addr = try getFuncFrom(allocator, pid, lib_path, func_name);
-    const func_result = try execFunc(pid, func_addr, &func_args);
-    std.log.info("{s}() -> {d}", .{ func_name, func_result });
+    const func_result = try execFunc(pid, func_addr, func_args.items);
+    std.log.info("{s}({any}) -> {d}", .{ func_name, func_args.items, func_result });
 
     const dlclose_addr = try getFuncFrom(allocator, pid, "libc", "dlclose@@GLIBC_2.34");
     std.log.info("Unloading {s}...", .{lib_path});
