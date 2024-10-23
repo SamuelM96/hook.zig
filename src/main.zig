@@ -49,7 +49,6 @@ pub fn main() !void {
     const lib_handle = try loadLibrary(allocator, pid, lib_path);
     std.log.info("Obtained handle: 0x{x}", .{lib_handle});
 
-    // TODO: Abstract out function calling
     // TODO: Call dlclose() on loaded library handle
 }
 
@@ -328,20 +327,51 @@ fn getELFHeaderFromRegion(pid: pid_t, base: usize) !std.elf.Header {
     return std.elf.Header.parse(@alignCast(&std.mem.toBytes(header)));
 }
 
+fn execFunc(pid: pid_t, addr: usize, args: []const usize) !usize {
+    var orig_regs = try getRegs(pid);
+    var regs = orig_regs;
+    regs.rip = addr;
+    regs.rax = 0;
+
+    std.log.debug("Setting return address to 0x{x}...", .{orig_regs.rip});
+    regs.rsp = orig_regs.rsp - 256;
+    try ptrace(PTRACE.POKEDATA, pid, regs.rsp, orig_regs.rip);
+
+    for (0..args.len, args) |i, arg| {
+        // TODO: Support other ABIs
+        switch (i) {
+            0 => regs.rdi = arg,
+            1 => regs.rsi = arg,
+            2 => regs.rdx = arg,
+            3 => regs.rcx = arg,
+            4 => regs.r8 = arg,
+            5 => regs.r9 = arg,
+            else => {
+                regs.rsp -= @sizeOf(usize);
+                try ptrace(PTRACE.POKEDATA, pid, regs.rsp, arg);
+            },
+        }
+    }
+
+    std.log.debug("Calling function @ 0x{x}...", .{addr});
+    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
+    try continueUntil(pid, orig_regs.rip);
+
+    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
+    const ret: usize = @intCast(regs.rax);
+
+    std.log.debug("Restoring previous state...", .{});
+    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&orig_regs));
+
+    return ret;
+}
+
 fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !usize {
     const rwx_area = try injectMmap(pid, 0, lib_path.len + 1, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
     std.log.debug("Obtained RWX memory @ 0x{x}", .{rwx_area});
 
     std.log.debug("Writing path of library to inject into process...", .{});
     try writeData(pid, rwx_area, lib_path);
-
-    var orig_regs: c.user_regs_struct = undefined;
-    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&orig_regs));
-    var regs = orig_regs;
-
-    regs.rax = 0;
-    regs.rdi = rwx_area;
-    regs.rsi = c.RTLD_NOW;
 
     const base = try baseAddress(allocator, pid, "libc");
     std.log.info("Libc base: 0x{x}", .{base});
@@ -357,25 +387,10 @@ fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !
     const dlopen_addr = base + dlopen_offset;
     std.log.info("Located {s} @ offset 0x{x} (0x{x})", .{ dlopen_name, dlopen_offset, dlopen_addr });
 
-    regs.rip = dlopen_addr;
-    std.log.debug("dlopen() address found: 0x{x}", .{dlopen_addr});
-
-    std.log.debug("Setting return address to 0x{x}...", .{orig_regs.rip});
-    regs.rsp -= 256;
-    try ptrace(PTRACE.POKEDATA, pid, regs.rsp, orig_regs.rip);
-
-    std.log.debug("Forcing dlopen() call to load {s}...", .{lib_path});
-    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
-    try continueUntil(pid, orig_regs.rip);
-
-    try ptrace(PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
-    const lib_handle: usize = @intCast(regs.rax);
+    const lib_handle: usize = try execFunc(pid, dlopen_addr, &[_]usize{ rwx_area, c.RTLD_NOW });
     if (lib_handle == 0) {
         return error.InvalidLibraryHandle;
     }
-
-    std.log.debug("Restoring previous state...", .{});
-    try ptrace(PTRACE.SETREGS, pid, 0, @intFromPtr(&orig_regs));
 
     return lib_handle;
 }
