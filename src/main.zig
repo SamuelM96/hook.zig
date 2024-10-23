@@ -49,7 +49,22 @@ pub fn main() !void {
     const lib_handle = try loadLibrary(allocator, pid, lib_path);
     std.log.info("Obtained handle: 0x{x}", .{lib_handle});
 
-    // TODO: Call dlclose() on loaded library handle
+    const base = try baseAddress(allocator, pid, "libc");
+    std.log.info("Libc base: 0x{x}", .{base});
+
+    const region_path = try getPathForRegion(allocator, pid, base);
+    std.log.info("Path: {s}", .{region_path});
+
+    const region_file = try std.fs.openFileAbsolute(region_path, .{});
+    const raw_elf = try region_file.readToEndAlloc(allocator, std.math.maxInt(usize));
+
+    const dlclose_name = "dlclose@@GLIBC_2.34";
+    const dlclose_offset = try getFunctionOffset(raw_elf, dlclose_name);
+    const dlclose_addr = base + dlclose_offset;
+    std.log.info("Located {s} @ offset 0x{x} (0x{x})", .{ dlclose_name, dlclose_offset, dlclose_addr });
+
+    const result = try execFunc(pid, dlclose_addr, &[_]usize{lib_handle});
+    std.log.info("dlclose(0x{x}) -> {d}", .{ lib_handle, result });
 }
 
 inline fn readData(pid: pid_t, addr: usize, dest: *[]u8) !void {
