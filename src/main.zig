@@ -46,22 +46,8 @@ pub fn main() !void {
     try attach(pid);
     defer detach(pid) catch |err| std.log.err("Failed to detach from {d}: {}", .{ pid, err });
 
-    const base = try baseAddress(allocator, pid, "libc");
-    std.log.info("Base: 0x{x}", .{base});
-
-    const region_path = try getPathForRegion(allocator, pid, base);
-    std.log.info("Path: {s}", .{region_path});
-
-    const region_file = try std.fs.openFileAbsolute(region_path, .{});
-    const raw_elf = try region_file.readToEndAlloc(allocator, std.math.maxInt(usize));
-
-    const func = "dlopen@@GLIBC_2.34";
-    const func_offset = try getFunctionOffset(raw_elf, func);
-    const func_addr = base + func_offset;
-    std.log.info("Located {s} @ offset 0x{x} (0x{x})", .{ func, func_offset, func_addr });
-
-    // const lib_handle = try loadLibrary(allocator, pid, lib_path);
-    // std.log.info("Obtained handle: 0x{x}", .{lib_handle});
+    const lib_handle = try loadLibrary(allocator, pid, lib_path);
+    std.log.info("Obtained handle: 0x{x}", .{lib_handle});
 
     // TODO: Abstract out function calling
     // TODO: Call dlclose() on loaded library handle
@@ -360,9 +346,20 @@ fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !
     regs.rdi = rwx_area;
     regs.rsi = c.RTLD_NOW;
 
-    const libc_addr = try baseAddress(allocator, pid, "libc");
-    const dlopen_offset = 0x93300; // TODO: Get dlopen offset at runtime
-    const dlopen_addr = libc_addr + dlopen_offset;
+    const base = try baseAddress(allocator, pid, "libc");
+    std.log.info("Libc base: 0x{x}", .{base});
+
+    const region_path = try getPathForRegion(allocator, pid, base);
+    std.log.info("Path: {s}", .{region_path});
+
+    const region_file = try std.fs.openFileAbsolute(region_path, .{});
+    const raw_elf = try region_file.readToEndAlloc(allocator, std.math.maxInt(usize));
+
+    const dlopen_name = "dlopen@@GLIBC_2.34";
+    const dlopen_offset = try getFunctionOffset(raw_elf, dlopen_name);
+    const dlopen_addr = base + dlopen_offset;
+    std.log.info("Located {s} @ offset 0x{x} (0x{x})", .{ dlopen_name, dlopen_offset, dlopen_addr });
+
     regs.rip = dlopen_addr;
     std.log.debug("dlopen() address found: 0x{x}", .{dlopen_addr});
 
