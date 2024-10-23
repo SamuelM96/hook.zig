@@ -49,7 +49,7 @@ pub fn main() !void {
     const base = try baseAddress(allocator, pid, "libc");
     std.log.info("Base: 0x{x}", .{base});
 
-    const header = try getELFHeaderFromMemory(pid, base);
+    const header = try getELFHeaderFromRegion(pid, base);
     std.log.info("Entry: 0x{x}", .{header.entry});
 
     // e_shoff is often the last part of the header, and so can be used to calculate the total size
@@ -58,15 +58,16 @@ pub fn main() !void {
     const elf_size = header.shoff + (header.shentsize * header.shnum);
     std.log.info("ELF size: {d}", .{elf_size});
 
-    const exe_path = try getPathForRegion(allocator, pid, base);
-    std.log.info("Path: {s}", .{exe_path});
+    const region_path = try getPathForRegion(allocator, pid, base);
+    std.log.info("Path: {s}", .{region_path});
 
-    const exe_file = try std.fs.openFileAbsolute(exe_path, .{});
-    const raw = try exe_file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    const region_file = try std.fs.openFileAbsolute(region_path, .{});
+    const raw_elf = try region_file.readToEndAlloc(allocator, std.math.maxInt(usize));
 
     const func = "dlopen@@GLIBC_2.34";
-    const main_offset = try getFunctionOffset(header, raw, func);
-    std.log.info("Located {s} @ 0x{x}", .{ func, main_offset });
+    const func_offset = try getFunctionOffset(header, raw_elf, func);
+    const func_addr = base + func_offset;
+    std.log.info("Located {s} @ offset 0x{x} (0x{x})", .{ func, func_offset, func_addr });
 
     // const lib_handle = try loadLibrary(allocator, pid, lib_path);
     // std.log.info("Obtained handle: 0x{x}", .{lib_handle});
@@ -342,8 +343,7 @@ fn getELFHeaderFromFile(allocator: std.mem.Allocator, filepath: []const u8) !std
     return try std.elf.Header.read(&stream);
 }
 
-// TODO: Get other function addresses by parsing ELF files
-fn getELFHeaderFromMemory(pid: pid_t, base: usize) !std.elf.Header {
+fn getELFHeaderFromRegion(pid: pid_t, base: usize) !std.elf.Header {
     var header: std.elf.Elf64_Ehdr = undefined;
     var i: usize = 0;
     while (i < @sizeOf(@TypeOf(header))) : (i += @sizeOf(usize)) {
