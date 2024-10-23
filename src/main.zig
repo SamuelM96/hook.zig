@@ -46,25 +46,16 @@ pub fn main() !void {
     try attach(pid);
     defer detach(pid) catch |err| std.log.err("Failed to detach from {d}: {}", .{ pid, err });
 
+    std.log.info("Loading {s}...", .{lib_path});
     const lib_handle = try loadLibrary(allocator, pid, lib_path);
-    std.log.info("Obtained handle: 0x{x}", .{lib_handle});
+    std.log.info("Obtained handle for {s}: 0x{x}", .{ lib_path, lib_handle });
 
-    const base = try baseAddress(allocator, pid, "libc");
-    std.log.info("Libc base: 0x{x}", .{base});
-
-    const region_path = try getPathForRegion(allocator, pid, base);
-    std.log.info("Path: {s}", .{region_path});
-
-    const region_file = try std.fs.openFileAbsolute(region_path, .{});
-    const raw_elf = try region_file.readToEndAlloc(allocator, std.math.maxInt(usize));
-
-    const dlclose_name = "dlclose@@GLIBC_2.34";
-    const dlclose_offset = try getFunctionOffset(raw_elf, dlclose_name);
-    const dlclose_addr = base + dlclose_offset;
-    std.log.info("Located {s} @ offset 0x{x} (0x{x})", .{ dlclose_name, dlclose_offset, dlclose_addr });
-
+    const dlclose_addr = try getFuncFrom(allocator, pid, "libc", "dlclose@@GLIBC_2.34");
+    std.log.info("Unloading {s}...", .{lib_path});
     const result = try execFunc(pid, dlclose_addr, &[_]usize{lib_handle});
     std.log.info("dlclose(0x{x}) -> {d}", .{ lib_handle, result });
+
+    // TODO: Cache function and base addresses
 }
 
 inline fn readData(pid: pid_t, addr: usize, dest: *[]u8) !void {
@@ -121,7 +112,7 @@ inline fn injectMmap(pid: pid_t, addr: usize, length: usize, prot: i64, flags: i
 }
 
 fn injectSyscall(pid: pid_t, regs: *c.user_regs_struct) !void {
-    // HACK: Technically this save/restore logic would be make into an inline wrapper or similar
+    // HACK: Technically this save/restore logic could be made into an inline wrapper or similar
     // I'll wait until the code gets more complex to avoid premature optimisaton.
     var orig_regs = try getRegs(pid);
     std.log.debug("Original registers: {}", .{orig_regs});
@@ -388,19 +379,8 @@ fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !
     std.log.debug("Writing path of library to inject into process...", .{});
     try writeData(pid, rwx_area, lib_path);
 
-    const base = try baseAddress(allocator, pid, "libc");
-    std.log.info("Libc base: 0x{x}", .{base});
-
-    const region_path = try getPathForRegion(allocator, pid, base);
-    std.log.info("Path: {s}", .{region_path});
-
-    const region_file = try std.fs.openFileAbsolute(region_path, .{});
-    const raw_elf = try region_file.readToEndAlloc(allocator, std.math.maxInt(usize));
-
     const dlopen_name = "dlopen@@GLIBC_2.34";
-    const dlopen_offset = try getFunctionOffset(raw_elf, dlopen_name);
-    const dlopen_addr = base + dlopen_offset;
-    std.log.info("Located {s} @ offset 0x{x} (0x{x})", .{ dlopen_name, dlopen_offset, dlopen_addr });
+    const dlopen_addr = try getFuncFrom(allocator, pid, "libc", dlopen_name);
 
     const lib_handle: usize = try execFunc(pid, dlopen_addr, &[_]usize{ rwx_area, c.RTLD_NOW });
     if (lib_handle == 0) {
@@ -408,6 +388,24 @@ fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !
     }
 
     return lib_handle;
+}
+
+fn getFuncFrom(allocator: std.mem.Allocator, pid: pid_t, region_name: []const u8, func_name: []const u8) !usize {
+    // TODO: Get base addr and path at the same time
+    // Maybe just return a hashmap of the maps file? {base: path, ...}
+    const base = try baseAddress(allocator, pid, region_name);
+    std.log.info("{s} base @ 0x{x}", .{ region_name, base });
+
+    const region_path = try getPathForRegion(allocator, pid, base);
+    std.log.info("Path: {s}", .{region_path});
+
+    const region_file = try std.fs.openFileAbsolute(region_path, .{});
+    const raw_elf = try region_file.readToEndAlloc(allocator, std.math.maxInt(usize));
+
+    const func_offset = try getFunctionOffset(raw_elf, func_name);
+    const func_addr = base + func_offset;
+    std.log.info("Located {s} @ offset 0x{x} (0x{x})", .{ func_name, func_offset, func_addr });
+    return func_addr;
 }
 
 fn getFunctionOffset(elf_file: []const u8, func_name: []const u8) !usize {
