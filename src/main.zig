@@ -50,6 +50,12 @@ pub fn main() !void {
     const lib_handle = try loadLibrary(allocator, pid, lib_path);
     std.log.info("Obtained handle for {s}: 0x{x}", .{ lib_path, lib_handle });
 
+    const func_name = "hello";
+    const func_args = [_]usize{};
+    const func_addr = try getFuncFrom(allocator, pid, lib_path, func_name);
+    const func_result = try execFunc(pid, func_addr, &func_args);
+    std.log.info("{s}() -> {d}", .{ func_name, func_result });
+
     const dlclose_addr = try getFuncFrom(allocator, pid, "libc", "dlclose@@GLIBC_2.34");
     std.log.info("Unloading {s}...", .{lib_path});
     const result = try execFunc(pid, dlclose_addr, &[_]usize{lib_handle});
