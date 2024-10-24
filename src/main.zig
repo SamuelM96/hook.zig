@@ -22,13 +22,21 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     if (args.len != 4) {
         const prog = std.fs.path.basename(args[0]);
-        std.log.err("usage: {s} <pid> <library> <lua_code>", .{prog});
+        std.log.err("usage: {s} <pid> <library> <code_or_file>", .{prog});
         return;
     }
     const pid = try std.fmt.parseInt(pid_t, args[1], 10);
     const lib_path = try std.fs.path.resolve(allocator, &.{args[2]});
     defer allocator.free(lib_path);
-    const lua_code = args[3];
+
+    var lua_code: []const u8 = undefined;
+    if (std.fs.cwd().readFileAlloc(allocator, args[3], std.math.maxInt(usize))) |code| {
+        lua_code = std.mem.trim(u8, code, &[_]u8{ ' ', '\n', '\r', '\t' });
+        std.log.info("Lua file to inject:\n{s}", .{lua_code});
+    } else |_| {
+        lua_code = args[3];
+        std.log.info("Lua string to inject: {s}", .{lua_code});
+    }
 
     if (c.cs_open(c.CS_ARCH_X86, c.CS_MODE_64, &CSHandle) != c.CS_ERR_OK) {
         std.log.err("Failed to open Capstone disassembler.", .{});
@@ -68,7 +76,7 @@ pub fn main() !void {
 
     const lua_exec_addr = try getFuncFrom(allocator, pid, lib_path, "exec");
     const lua_exec_result = try execFunc(pid, lua_exec_addr, &[_]usize{lua_code_addr});
-    std.log.info("exec(\"{s}\") -> {d}", .{ lua_code, lua_exec_result });
+    std.log.info("exec(lua_code) -> {d}", .{lua_exec_result});
 
     const dlclose_addr = try getFuncFrom(allocator, pid, "libc", "dlclose@@GLIBC_2.34");
     std.log.info("Unloading {s}...", .{lib_path});
