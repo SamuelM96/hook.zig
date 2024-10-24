@@ -32,10 +32,9 @@ export fn exec(code: [*c]const u8) usize {
 
     const status = c.luaL_dostring(L, code);
     if (status) {
-        var err_len: usize = undefined;
-        const err: [*c]const u8 = c.lua_tolstring(L, -1, &err_len);
-        std.log.err("Failed to execute code: {s}", .{err[0..err_len]});
-        c.lua_close(L);
+        var len: usize = undefined;
+        const err: [:0]const u8 = c.lua_tolstring(L, -1, &len)[0..len :0];
+        std.log.err("Failed to execute code: {s}", .{err});
         return 1;
     }
 
