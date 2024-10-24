@@ -15,6 +15,18 @@ const MAP_ANONYMOUS = 0x20;
 
 const RTLD_NOW = 2;
 
+// TODO: Support other platform types
+// - Android
+// - iOS
+// - Windows
+// - macOS
+// - FreeBSD
+// TODO: Support different process injection methods
+// - Windows debugging API
+// - GDB/LLDB
+// - LD_PRELOAD/patching
+// TODO: Account for not all architectures supporting PTRACE_SINGLESTEP
+// - Can just PEEKDATA & POKEDATA a bunch to set breakpoints
 pub const Process = struct {
     pid: pid_t,
 
@@ -142,7 +154,11 @@ pub const Process = struct {
         return regs;
     }
 
+    // TODO: Track allocated memory so it can be freed
+    // TODO: munmap() to free mmap() allocated memory
     // TODO: Alternative: scan for code caves
+    // TODO: Alternative: malloc and free (find addresses in memory)
+    // TODO: Allocator abstraction around the different methods?
     pub inline fn injectMmap(self: *const Process, addr: usize, length: usize, args: struct { prot: i64 = PROT.READ | PROT.WRITE | PROT.EXEC, flags: i64 = MAP_PRIVATE | MAP_ANONYMOUS, fd: i64 = 0, offset: usize = 0 }) !usize {
         var regs = try self.getRegs();
 

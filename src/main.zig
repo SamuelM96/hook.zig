@@ -8,6 +8,8 @@ const c = @cImport({
 
 var CSHandle: c.csh = undefined;
 
+// TODO: REPL for live code exec
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();

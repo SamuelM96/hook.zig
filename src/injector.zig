@@ -2,10 +2,29 @@ const std = @import("std");
 const PROT = std.posix.PROT;
 const process = @import("process.zig");
 
+// TODO: Support different payload runtimes
+// - Raw shellcode (FASM?)
+// - TCC for C
+// - QuickJS
+// - Python
+// - Dynamically compile .zig libraries if `zig` is available?
+// TODO: Design a common interface for payload libraries
+// - If there's a defined C ABI, then it should be possible? All boils down to loading the library in memory and initialising it, then feeding it data to execute.
+// TODO: Luajit FFI back to Zig
+// TODO: Cache compiled Lua functions
+//
+// TODO: Function hooking
+// - Save prologue (how many bytes?)
+// - Save clobbered registers
+// - Setup arguments to give registers and what callback
+// - Jump to payload to execute callback
+// - Execute saved prologue, then jump back to original code to continue
+// - For exit override, set breakpoint on return address
+// - Track hooks, callbacks, and addresses
+
 pub const Injector = struct {
     allocator: std.mem.Allocator,
     target: *const process.Process,
-    payload_path: []const u8,
     payload_handle: usize,
     clean_addr: usize,
     exec_addr: usize,
@@ -29,7 +48,6 @@ pub const Injector = struct {
         return .{
             .allocator = allocator,
             .target = target,
-            .payload_path = payload_path,
             .payload_handle = payload_handle,
             .clean_addr = lua_clean_addr,
             .exec_addr = lua_exec_addr,
