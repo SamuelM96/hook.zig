@@ -20,23 +20,15 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     const args = try std.process.argsAlloc(allocator);
-    if (args.len < 4) {
+    if (args.len != 4) {
         const prog = std.fs.path.basename(args[0]);
-        std.log.err("usage: {s} <pid> <library> <func_name> [ARG...]", .{prog});
+        std.log.err("usage: {s} <pid> <library> <lua_code>", .{prog});
         return;
     }
     const pid = try std.fmt.parseInt(pid_t, args[1], 10);
     const lib_path = try std.fs.path.resolve(allocator, &.{args[2]});
     defer allocator.free(lib_path);
-    const func_name = args[3];
-
-    var func_args = std.ArrayList(usize).init(allocator);
-    if (args.len > 4) {
-        for (args[4..args.len]) |arg| {
-            // TODO: Support different parameter types
-            try func_args.append(try std.fmt.parseInt(usize, arg, 10));
-        }
-    }
+    const lua_code = args[3];
 
     if (c.cs_open(c.CS_ARCH_X86, c.CS_MODE_64, &CSHandle) != c.CS_ERR_OK) {
         std.log.err("Failed to open Capstone disassembler.", .{});
@@ -60,9 +52,23 @@ pub fn main() !void {
     const lib_handle = try loadLibrary(allocator, pid, lib_path);
     std.log.info("Obtained handle for {s}: 0x{x}", .{ lib_path, lib_handle });
 
-    const func_addr = try getFuncFrom(allocator, pid, lib_path, func_name);
-    const func_result = try execFunc(pid, func_addr, func_args.items);
-    std.log.info("{s}({any}) -> {d}", .{ func_name, func_args.items, func_result });
+    const lua_load_addr = try getFuncFrom(allocator, pid, lib_path, "load");
+    const lua_load_result = try execFunc(pid, lua_load_addr, &[_]usize{});
+    std.log.info("load() -> {d}", .{lua_load_result});
+    if (lua_load_result == 1) {
+        std.log.err("Failed to load luajit runtime", .{});
+        std.posix.exit(1);
+    }
+
+    const lua_code_addr = try injectMmap(pid, 0, lua_code.len + 1, PROT.READ | PROT.WRITE | PROT.EXEC, c.MAP_PRIVATE | c.MAP_ANONYMOUS, 0, 0);
+    std.log.debug("Obtained RWX memory @ 0x{x}", .{lua_code_addr});
+
+    std.log.debug("Writing lua code to inject into process...", .{});
+    try writeData(pid, lua_code_addr, lua_code);
+
+    const lua_exec_addr = try getFuncFrom(allocator, pid, lib_path, "exec");
+    const lua_exec_result = try execFunc(pid, lua_exec_addr, &[_]usize{lua_code_addr});
+    std.log.info("exec(\"{s}\") -> {d}", .{ lua_code, lua_exec_result });
 
     const dlclose_addr = try getFuncFrom(allocator, pid, "libc", "dlclose@@GLIBC_2.34");
     std.log.info("Unloading {s}...", .{lib_path});

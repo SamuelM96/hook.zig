@@ -4,6 +4,16 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const payload = b.addSharedLibrary(.{
+        .name = "payload",
+        .target = target,
+        .optimize = optimize,
+    });
+    payload.addCSourceFile(.{ .file = .{ .cwd_relative = "src/payload.c" }, .flags = &[_][]const u8{ "-std=c99", "-fPIC" } });
+    payload.linkLibC();
+    payload.linkSystemLibrary("luajit-5.1");
+    b.installArtifact(payload);
+
     const exe = b.addExecutable(.{
         .name = "hook.zig",
         .root_source_file = b.path("src/main.zig"),
