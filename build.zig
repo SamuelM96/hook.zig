@@ -6,11 +6,11 @@ pub fn build(b: *std.Build) void {
 
     const payload = b.addSharedLibrary(.{
         .name = "payload",
+        .root_source_file = b.path("src/payload.zig"),
         .target = target,
         .optimize = optimize,
     });
-    payload.addCSourceFile(.{ .file = .{ .cwd_relative = "src/payload.c" }, .flags = &[_][]const u8{ "-std=c99", "-fPIC" } });
-    payload.linkLibC();
+    // payload.linkLibC();
     payload.linkSystemLibrary("luajit-5.1");
     b.installArtifact(payload);
 
