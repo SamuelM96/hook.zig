@@ -58,6 +58,9 @@ pub fn main() !void {
 
     std.log.info("Loading {s}...", .{lib_path});
     const lib_handle = try loadLibrary(allocator, pid, lib_path);
+    defer unloadLibrary(allocator, pid, lib_handle) catch |err| {
+        std.log.err("{}", .{err});
+    };
     std.log.info("Obtained handle for {s}: 0x{x}", .{ lib_path, lib_handle });
 
     const lua_load_addr = try getFuncFrom(allocator, pid, lib_path, "load");
@@ -74,14 +77,15 @@ pub fn main() !void {
     std.log.debug("Writing lua code to inject into process...", .{});
     try writeData(pid, lua_code_addr, lua_code);
 
+    std.log.debug("Executing lua code...", .{});
     const lua_exec_addr = try getFuncFrom(allocator, pid, lib_path, "exec");
     const lua_exec_result = try execFunc(pid, lua_exec_addr, &[_]usize{lua_code_addr});
-    std.log.info("exec(lua_code) -> {d}", .{lua_exec_result});
+    std.log.debug("exec(lua_code) -> {d}", .{lua_exec_result});
 
-    const dlclose_addr = try getFuncFrom(allocator, pid, "libc", "dlclose@@GLIBC_2.34");
-    std.log.info("Unloading {s}...", .{lib_path});
-    const result = try execFunc(pid, dlclose_addr, &[_]usize{lib_handle});
-    std.log.info("dlclose(0x{x}) -> {d}", .{ lib_handle, result });
+    std.log.debug("Unloading lua...", .{});
+    const lua_clean_addr = try getFuncFrom(allocator, pid, lib_path, "clean");
+    const lua_clean_result = try execFunc(pid, lua_clean_addr, &[_]usize{});
+    std.log.debug("clean() -> {d}", .{lua_clean_result});
 
     // TODO: Cache function and base addresses
 }
@@ -303,6 +307,15 @@ fn loadLibrary(allocator: std.mem.Allocator, pid: pid_t, lib_path: []const u8) !
     }
 
     return lib_handle;
+}
+
+fn unloadLibrary(allocator: std.mem.Allocator, pid: pid_t, handle: usize) !void {
+    const dlclose_addr = try getFuncFrom(allocator, pid, "libc", "dlclose@@GLIBC_2.34");
+    const result = try execFunc(pid, dlclose_addr, &[_]usize{handle});
+    std.log.debug("dlclose(0x{x}) -> {d}", .{ handle, result });
+    if (result != 0) {
+        return error.CloseHandleFailed;
+    }
 }
 
 // FIX: I don't know why, but sometimes tests will just hang. Running the same code outside a test case works...
