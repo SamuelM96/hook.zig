@@ -63,14 +63,14 @@ pub const Process = struct {
         }
     }
 
-    pub inline fn readData(self: *const Process, addr: usize, dest: *[]u8) !void {
+    pub inline fn readData(self: *const Process, addr: usize, dest: []u8) !void {
         const aligned_size: usize = @intFromFloat(@round(@as(f128, @floatFromInt(dest.len)) / @sizeOf(usize)));
         for (0..aligned_size) |i| {
             var datum: usize = undefined;
             const offset = i * @sizeOf(usize);
             try ptrace(PTRACE.PEEKDATA, self.pid, addr + offset, @intFromPtr(&datum));
             const len = if (dest.len - offset < @sizeOf(usize)) dest.len - offset else @sizeOf(usize);
-            std.mem.copyForwards(u8, dest.*[offset..dest.len], std.mem.toBytes(datum)[0..len]);
+            std.mem.copyForwards(u8, dest[offset..dest.len], std.mem.toBytes(datum)[0..len]);
         }
     }
 
