@@ -46,6 +46,9 @@ pub fn main() !void {
     lua_injector.injectFile(args[3]) catch {
         try lua_injector.inject(args[3]);
     };
+
+    const hook_me_addr = try target.getFuncFrom(allocator, "", "hook_me");
+    try target.hook(hook_me_addr);
 }
 
 // Do I *need* capstone? It does alleviate the need to write disassemblers for various platforms.

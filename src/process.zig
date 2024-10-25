@@ -372,6 +372,36 @@ pub const Process = struct {
         }
         return elf.Header.parse(@alignCast(&std.mem.toBytes(header)));
     }
+
+    pub fn hook(self: *const Process, addr: usize) !void {
+        std.log.info("Hooking function @ 0x{x}", .{addr});
+        _ = self;
+
+        // - Map function address to callback ID
+        // - If hooking exit, set breakpoint at return address
+        // - Disassemble iter from the start of the function until we have
+        //   enough bytes to load our code in.
+        // - Save those bytes based on total length of instructions iterated
+        // - Override with trampoline
+        //   - Push parameter types
+        //   - Push state of registers according to struct layout
+        //   - Set RDI to callback ID
+        //   - Set RSI to registers struct RSP+offset
+        //   - Set RDX to return type enum
+        //   - Set RCX to param type enum array RSP+offset
+        //   - Push return address (start of function)
+        //   - Set RIP to callbackHandler(callback:usize, regs:Registers,
+        //       returnType:CType, paramTypes:[]CType)
+        //     - Handler can sort out pass original params to callback
+        //   - Continue until return address
+        // - If callback returns a result, jump to return address
+        // - Else, restore prologue & original registers
+        //   - Execute till end of prologue
+        //   - Set breakpoint at start of function and continue execution
+        // - If return address breakpoint is hit, repeat steps but trampoline to
+        //   exit hook.
+        //   - Remove return breakpoint once finished.
+    }
 };
 
 // Copied from <sys/user.h>

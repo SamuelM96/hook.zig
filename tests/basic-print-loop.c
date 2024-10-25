@@ -4,10 +4,14 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+int hook_me(int i) {
+    return i*i;
+}
+
 int main(int argc, char *argv[]) {
   uint64_t i = 0;
   while (1) {
-    printf("%lu\n", i);
+    printf("%lu\n", hook_me(i));
     sleep(1);
     i += 1;
   }
