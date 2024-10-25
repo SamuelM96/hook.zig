@@ -28,6 +28,7 @@ pub const Injector = struct {
     payload_handle: usize,
     clean_addr: usize,
     exec_addr: usize,
+    hooks: std.AutoHashMap(usize, usize),
 
     pub fn init(allocator: std.mem.Allocator, target: *const process.Process, payload_path: []const u8) !Injector {
         std.log.info("Loading {s}...", .{payload_path});
@@ -45,13 +46,28 @@ pub const Injector = struct {
             std.posix.exit(1);
         }
 
+        const hooks = std.AutoHashMap(usize, usize).init(allocator);
+
         return .{
             .allocator = allocator,
             .target = target,
             .payload_handle = payload_handle,
             .clean_addr = clean_addr,
             .exec_addr = exec_addr,
+            .hooks = hooks,
         };
+    }
+
+    pub fn deinit(self: *const Injector) !void {
+        std.log.debug("Unloading runtime...", .{});
+        const clean_result = try self.target.execFunc(self.clean_addr, &[_]usize{});
+        std.log.debug("clean() -> {d}", .{clean_result});
+        if (clean_result != 0) {
+            return error.RuntimeCleanFailed;
+        }
+
+        try self.target.unloadLibrary(self.allocator, self.payload_handle);
+        // TODO: Clean up mmap'd memory
     }
 
     pub fn inject(self: *const Injector, code: []const u8) !void {
@@ -76,15 +92,33 @@ pub const Injector = struct {
         }
     }
 
-    pub fn deinit(self: *const Injector) !void {
-        std.log.debug("Unloading runtime...", .{});
-        const clean_result = try self.target.execFunc(self.clean_addr, &[_]usize{});
-        std.log.debug("clean() -> {d}", .{clean_result});
-        if (clean_result != 0) {
-            return error.RuntimeCleanFailed;
-        }
+    pub fn hook(self: *const Injector, addr: usize) !void {
+        std.log.info("Hooking function @ 0x{x}", .{addr});
+        _ = self;
 
-        try self.target.unloadLibrary(self.allocator, self.payload_handle);
-        // TODO: Clean up mmap'd memory
+        // - Map function address to callback ID
+        // - If hooking exit, set breakpoint at return address
+        // - Disassemble iter from the start of the function until we have
+        //   enough bytes to load our code in.
+        // - Save those bytes based on total length of instructions iterated
+        // - Override with trampoline
+        //   - Push parameter types
+        //   - Push state of registers according to struct layout
+        //   - Set RDI to callback ID
+        //   - Set RSI to registers struct RSP+offset
+        //   - Set RDX to return type enum
+        //   - Set RCX to param type enum array RSP+offset
+        //   - Push return address (start of function)
+        //   - Set RIP to callbackHandler(callback:usize, regs:Registers,
+        //       returnType:CType, paramTypes:[]CType)
+        //     - Handler can sort out pass original params to callback
+        //   - Continue until return address
+        // - If callback returns a result, jump to return address
+        // - Else, restore prologue & original registers
+        //   - Execute till end of prologue
+        //   - Set breakpoint at start of function and continue execution
+        // - If return address breakpoint is hit, repeat steps but trampoline to
+        //   exit hook.
+        //   - Remove return breakpoint once finished.
     }
 };
