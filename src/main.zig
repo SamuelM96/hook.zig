@@ -20,7 +20,8 @@ pub fn main() !void {
         std.log.err("usage: {s} <pid> <library> <code_or_file>", .{prog});
         return;
     }
-    const target = process.Process{ .pid = try std.fmt.parseInt(std.posix.pid_t, args[1], 10) };
+    const target = process.Process.init(allocator, try std.fmt.parseInt(std.posix.pid_t, args[1], 10));
+    defer target.deinit();
     const lib_path = try std.fs.path.resolve(allocator, &.{args[2]});
     defer allocator.free(lib_path);
 
@@ -36,7 +37,6 @@ pub fn main() !void {
     }
 
     try target.attach();
-    defer target.detach() catch |err| std.log.err("Failed to detach from {d}: {}", .{ target.pid, err });
 
     const lua_injector = try injector.Injector.init(allocator, &target, lib_path);
     defer lua_injector.deinit() catch |err| {
@@ -47,8 +47,8 @@ pub fn main() !void {
         try lua_injector.inject(args[3]);
     };
 
-    const hook_me_addr = try target.getFuncFrom(allocator, "", "hook_me");
-    try injector.hook(hook_me_addr);
+    const hook_me_addr = try target.getFuncFrom("", "hook_me");
+    try lua_injector.hook(hook_me_addr);
 }
 
 // Do I *need* capstone? It does alleviate the need to write disassemblers for various platforms.

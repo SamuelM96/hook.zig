@@ -28,7 +28,24 @@ const RTLD_NOW = 2;
 // TODO: Account for not all architectures supporting PTRACE_SINGLESTEP
 // - Can just PEEKDATA & POKEDATA a bunch to set breakpoints
 pub const Process = struct {
+    allocator: std.mem.Allocator,
     pid: pid_t,
+
+    pub fn init(allocator: std.mem.Allocator, pid: pid_t) Process {
+        // Auto attach?
+        return .{
+            .allocator = allocator,
+            .pid = pid,
+        };
+    }
+
+    pub fn deinit(self: *const Process) void {
+        self.detach() catch |err| {
+            std.log.err("failed to detach from {d}: {any}", .{ self.pid, err });
+            // Return error?
+        };
+        // TODO: Handle memory deallocation
+    }
 
     pub inline fn isAlive(self: *const Process) !bool {
         std.posix.kill(self.pid, 0) catch |err| {
@@ -223,7 +240,7 @@ pub const Process = struct {
         try ptrace(PTRACE.SETREGS, self.pid, 0, @intFromPtr(&orig_regs));
     }
 
-    pub fn loadLibrary(self: *const Process, allocator: std.mem.Allocator, lib_path: []const u8) !usize {
+    pub fn loadLibrary(self: *const Process, lib_path: []const u8) !usize {
         const rwx_area = try self.injectMmap(0, lib_path.len + 1, .{});
         std.log.debug("Obtained RWX memory @ 0x{x}", .{rwx_area});
 
@@ -231,7 +248,7 @@ pub const Process = struct {
         try self.writeData(rwx_area, lib_path);
 
         const dlopen_name = "dlopen@@GLIBC_2.34";
-        const dlopen_addr = try self.getFuncFrom(allocator, "libc", dlopen_name);
+        const dlopen_addr = try self.getFuncFrom("libc", dlopen_name);
 
         const lib_handle: usize = try self.execFunc(dlopen_addr, &[_]usize{ rwx_area, RTLD_NOW });
         if (lib_handle == 0) {
@@ -241,8 +258,8 @@ pub const Process = struct {
         return lib_handle;
     }
 
-    pub fn unloadLibrary(self: *const Process, allocator: std.mem.Allocator, handle: usize) !void {
-        const dlclose_addr = try self.getFuncFrom(allocator, "libc", "dlclose@@GLIBC_2.34");
+    pub fn unloadLibrary(self: *const Process, handle: usize) !void {
+        const dlclose_addr = try self.getFuncFrom("libc", "dlclose@@GLIBC_2.34");
         const result = try self.execFunc(dlclose_addr, &[_]usize{handle});
         std.log.debug("dlclose(0x{x}) -> {d}", .{ handle, result });
         if (result != 0) {
@@ -250,9 +267,9 @@ pub const Process = struct {
         }
     }
 
-    pub fn getBaseAddress(self: *const Process, allocator: std.mem.Allocator, filename: []const u8) !usize {
-        const maps_path = try std.fmt.allocPrint(allocator, "/proc/{d}/maps", .{self.pid});
-        defer allocator.free(maps_path);
+    pub fn getBaseAddress(self: *const Process, filename: []const u8) !usize {
+        const maps_path = try std.fmt.allocPrint(self.allocator, "/proc/{d}/maps", .{self.pid});
+        defer self.allocator.free(maps_path);
 
         const file = try std.fs.openFileAbsolute(maps_path, .{});
         defer file.close();
@@ -272,9 +289,9 @@ pub const Process = struct {
         return error.NotFoundInMapsFile;
     }
 
-    pub fn getMappedRegion(self: *const Process, allocator: std.mem.Allocator, filename: []const u8) ![]u8 {
-        const maps_path = try std.fmt.allocPrint(allocator, "/proc/{d}/maps", .{self.pid});
-        defer allocator.free(maps_path);
+    pub fn getMappedRegion(self: *const Process, filename: []const u8) ![]u8 {
+        const maps_path = try std.fmt.allocPrint(self.allocator, "/proc/{d}/maps", .{self.pid});
+        defer self.allocator.free(maps_path);
 
         const file = try std.fs.openFileAbsolute(maps_path, .{});
         defer file.close();
@@ -312,15 +329,15 @@ pub const Process = struct {
 
         std.log.info("{s} : 0x{x} - 0x{x}", .{ exe_path, start, end });
         const total_size = end - start;
-        var region = try allocator.alloc(u8, total_size);
+        var region = try self.allocator.alloc(u8, total_size);
         try self.readData(start, &region);
 
         return region;
     }
 
-    pub fn getPathForRegion(self: *const Process, allocator: std.mem.Allocator, base: usize) ![]u8 {
-        const maps_path = try std.fmt.allocPrint(allocator, "/proc/{d}/maps", .{self.pid});
-        defer allocator.free(maps_path);
+    pub fn getPathForRegion(self: *const Process, base: usize) ![]u8 {
+        const maps_path = try std.fmt.allocPrint(self.allocator, "/proc/{d}/maps", .{self.pid});
+        defer self.allocator.free(maps_path);
 
         const file = try std.fs.openFileAbsolute(maps_path, .{});
         defer file.close();
@@ -338,23 +355,23 @@ pub const Process = struct {
                 while (iter.next()) |data| {
                     exe_path = data;
                 }
-                return allocator.dupe(u8, exe_path orelse return error.NotFoundInMapsFile);
+                return self.allocator.dupe(u8, exe_path orelse return error.NotFoundInMapsFile);
             }
         }
 
         return error.NotFoundInMapsFile;
     }
-    pub fn getFuncFrom(self: *const Process, allocator: std.mem.Allocator, region_name: []const u8, func_name: []const u8) !usize {
+    pub fn getFuncFrom(self: *const Process, region_name: []const u8, func_name: []const u8) !usize {
         // TODO: Get base addr and path at the same time
         // Maybe just return a hashmap of the maps file? {base: path, ...}
-        const base = try self.getBaseAddress(allocator, region_name);
+        const base = try self.getBaseAddress(region_name);
         std.log.info("{s} base @ 0x{x}", .{ region_name, base });
 
-        const region_path = try self.getPathForRegion(allocator, base);
+        const region_path = try self.getPathForRegion(base);
         std.log.info("Path: {s}", .{region_path});
 
         const region_file = try std.fs.openFileAbsolute(region_path, .{});
-        const raw_elf = try region_file.readToEndAlloc(allocator, std.math.maxInt(usize));
+        const raw_elf = try region_file.readToEndAlloc(self.allocator, std.math.maxInt(usize));
 
         const func_offset = try getFunctionOffset(raw_elf, func_name);
         const func_addr = base + func_offset;

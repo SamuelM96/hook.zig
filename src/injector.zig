@@ -32,12 +32,12 @@ pub const Injector = struct {
 
     pub fn init(allocator: std.mem.Allocator, target: *const process.Process, payload_path: []const u8) !Injector {
         std.log.info("Loading {s}...", .{payload_path});
-        const payload_handle = try target.loadLibrary(allocator, payload_path);
+        const payload_handle = try target.loadLibrary(payload_path);
         std.log.info("Obtained handle for {s}: 0x{x}", .{ payload_path, payload_handle });
 
-        const load_addr = try target.getFuncFrom(allocator, payload_path, "load");
-        const clean_addr = try target.getFuncFrom(allocator, payload_path, "clean");
-        const exec_addr = try target.getFuncFrom(allocator, payload_path, "exec");
+        const load_addr = try target.getFuncFrom(payload_path, "load");
+        const clean_addr = try target.getFuncFrom(payload_path, "clean");
+        const exec_addr = try target.getFuncFrom(payload_path, "exec");
 
         const load_result = try target.execFunc(load_addr, &[_]usize{});
         std.log.info("load() -> {d}", .{load_result});
@@ -66,7 +66,7 @@ pub const Injector = struct {
             return error.RuntimeCleanFailed;
         }
 
-        try self.target.unloadLibrary(self.allocator, self.payload_handle);
+        try self.target.unloadLibrary(self.payload_handle);
         // TODO: Clean up mmap'd memory
     }
 
