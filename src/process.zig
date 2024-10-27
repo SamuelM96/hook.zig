@@ -355,7 +355,14 @@ pub const Process = struct {
                 while (iter.next()) |data| {
                     exe_path = data;
                 }
-                return self.allocator.dupe(u8, exe_path orelse return error.NotFoundInMapsFile);
+                if (exe_path) |path| {
+                    if (std.mem.eql(u8, path, "(deleted)")) {
+                        return error.MapFileDeleted;
+                    }
+                    return self.allocator.dupe(u8, path);
+                } else {
+                    break;
+                }
             }
         }
 
@@ -368,9 +375,6 @@ pub const Process = struct {
         std.log.info("{s} base @ 0x{x}", .{ region_name, base });
 
         const region_path = try self.getPathForRegion(base);
-        if (std.mem.eql(u8, region_path, "(deleted)")) {
-            return error.MapFileDeleted;
-        }
         std.log.info("Path: {s}", .{region_path});
 
         const region_file = try std.fs.openFileAbsolute(region_path, .{});
