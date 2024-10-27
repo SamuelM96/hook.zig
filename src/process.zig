@@ -368,6 +368,9 @@ pub const Process = struct {
         std.log.info("{s} base @ 0x{x}", .{ region_name, base });
 
         const region_path = try self.getPathForRegion(base);
+        if (std.mem.eql(u8, region_path, "(deleted)")) {
+            return error.MapFileDeleted;
+        }
         std.log.info("Path: {s}", .{region_path});
 
         const region_file = try std.fs.openFileAbsolute(region_path, .{});
