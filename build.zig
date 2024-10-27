@@ -76,7 +76,7 @@ pub fn build(b: *std.Build) !void {
             continue;
         }
         const c_lib = b.addSharedLibrary(.{
-            .name = entry.name,
+            .name = std.fs.path.stem(entry.name),
             .target = target,
             .optimize = optimize,
         });
