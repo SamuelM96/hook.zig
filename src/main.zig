@@ -38,7 +38,7 @@ pub fn main() !void {
 
     try target.attach();
 
-    const lua_injector = try injector.Injector.init(allocator, &target, lib_path);
+    var lua_injector = try injector.Injector.init(allocator, &target, lib_path);
     defer lua_injector.deinit() catch |err| {
         std.log.err("Failed to unload injector: {}", .{err});
     };
@@ -47,8 +47,12 @@ pub fn main() !void {
         try lua_injector.inject(args[3]);
     };
 
+    std.log.info("Hooking function hook_me()...", .{});
     const hook_me_addr = try target.getFuncFrom("", "hook_me");
-    try lua_injector.hook(hook_me_addr);
+    const code = "return function() print(\"hooked!\") end";
+    try lua_injector.hook(hook_me_addr, code);
+    std.log.info("Running injector...", .{});
+    try lua_injector.run();
 }
 
 // Do I *need* capstone? It does alleviate the need to write disassemblers for various platforms.

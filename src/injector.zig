@@ -1,6 +1,8 @@
 const std = @import("std");
 const PROT = std.posix.PROT;
 const process = @import("process.zig");
+const ptrace = std.posix.ptrace;
+const PTRACE = std.os.linux.PTRACE;
 
 // TODO: Support different payload runtimes
 // - Raw shellcode (FASM?)
@@ -28,7 +30,9 @@ pub const Injector = struct {
     payload_handle: usize,
     clean_addr: usize,
     exec_addr: usize,
-    hooks: std.AutoHashMap(usize, usize),
+    hook_addr: usize,
+    handle_addr: usize,
+    hooked_addresses: std.AutoHashMap(usize, usize),
 
     pub fn init(allocator: std.mem.Allocator, target: *const process.Process, payload_path: []const u8) !Injector {
         std.log.info("Loading {s}...", .{payload_path});
@@ -38,6 +42,8 @@ pub const Injector = struct {
         const load_addr = try target.getFuncFrom(payload_path, "load");
         const clean_addr = try target.getFuncFrom(payload_path, "clean");
         const exec_addr = try target.getFuncFrom(payload_path, "exec");
+        const hook_addr = try target.getFuncFrom(payload_path, "hook");
+        const handle_addr = try target.getFuncFrom(payload_path, "handle");
 
         const load_result = try target.execFunc(load_addr, &[_]usize{});
         std.log.info("load() -> {d}", .{load_result});
@@ -46,15 +52,15 @@ pub const Injector = struct {
             std.posix.exit(1);
         }
 
-        const hooks = std.AutoHashMap(usize, usize).init(allocator);
-
         return .{
             .allocator = allocator,
             .target = target,
             .payload_handle = payload_handle,
             .clean_addr = clean_addr,
             .exec_addr = exec_addr,
-            .hooks = hooks,
+            .hook_addr = hook_addr,
+            .handle_addr = handle_addr,
+            .hooked_addresses = std.AutoHashMap(usize, usize).init(allocator),
         };
     }
 
@@ -92,9 +98,20 @@ pub const Injector = struct {
         }
     }
 
-    pub fn hook(self: *const Injector, addr: usize) !void {
+    pub fn hook(self: *Injector, addr: usize, code: []const u8) !void {
         std.log.info("Hooking function @ 0x{x}", .{addr});
-        _ = self;
+
+        const rwx_mem = try self.target.injectMmap(0, code.len + 1, .{});
+        try self.target.writeData(rwx_mem, code);
+        if (try self.target.execFunc(self.hook_addr, &[_]usize{ addr, rwx_mem }) != 0) {
+            return error.HookFuncFailed;
+        } else {
+            var inst: usize = undefined;
+            std.log.debug("Patching 0x{x} with a breakpoint...", .{addr});
+            try ptrace(PTRACE.PEEKDATA, self.target.pid, addr, @intFromPtr(&inst));
+            try ptrace(PTRACE.POKEDATA, self.target.pid, addr, 0xCC);
+            try self.hooked_addresses.put(addr, inst);
+        }
 
         // - Map function address to callback ID
         // - If hooking exit, set breakpoint at return address
@@ -120,5 +137,45 @@ pub const Injector = struct {
         // - If return address breakpoint is hit, repeat steps but trampoline to
         //   exit hook.
         //   - Remove return breakpoint once finished.
+    }
+
+    pub fn run(self: *const Injector) !void {
+        // TODO: Move this loop to Process (waitUntilBreakpoint()?)
+        var signal: u32 = std.posix.SIG.CONT;
+        while (true) {
+            try ptrace(PTRACE.CONT, self.target.pid, 0, @intCast(signal));
+            const result = std.posix.waitpid(self.target.pid, 0);
+            signal = std.posix.W.STOPSIG(result.status);
+            if (std.posix.W.IFSTOPPED(result.status) and signal == std.posix.SIG.TRAP) {
+                var regs = try self.target.getRegs();
+                regs.rip -= 1;
+                if (self.hooked_addresses.get(regs.rip)) |inst| {
+                    std.log.info("Hit hooked function @ 0x{x}, triggering callback...", .{regs.rip});
+                    try ptrace(PTRACE.SETREGS, self.target.pid, 0, @intFromPtr(&regs));
+                    try ptrace(PTRACE.POKEDATA, self.target.pid, regs.rip, inst);
+                    if (try self.target.execFunc(self.handle_addr, &[_]usize{regs.rip}) != 0) {
+                        return error.HandleCallbackFailed;
+                    }
+                    try ptrace(PTRACE.SINGLESTEP, self.target.pid, 0, 0);
+                    const res = std.posix.waitpid(self.target.pid, 0);
+                    if (!std.posix.W.IFSTOPPED(res.status)) {
+                        std.log.debug("Error: {}", .{res.status});
+                        return error.WaitpidFailed;
+                    }
+                    try ptrace(PTRACE.POKEDATA, self.target.pid, regs.rip, (inst & ~@as(usize, 0xFF)) | 0xCC);
+                } else {
+                    std.log.err("Stopped on unknown address: 0x{x}. Continuing...", .{regs.rip});
+                }
+                signal = std.posix.SIG.CONT;
+                continue;
+            } else if (std.posix.W.IFSIGNALED(result.status)) {
+                // TODO: Provide a debug dump when the target exits unintentionally
+                std.log.err("Process {d} terminated due to signal {d}", .{ self.target.pid, std.posix.W.TERMSIG(result.status) });
+                std.posix.exit(1);
+            } else if (std.posix.W.IFEXITED(result.status)) {
+                std.log.err("Process {d} exited with status {d}", .{ self.target.pid, std.posix.W.EXITSTATUS(result.status) });
+                std.posix.exit(1);
+            }
+        }
     }
 };
