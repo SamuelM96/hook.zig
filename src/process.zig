@@ -76,6 +76,7 @@ pub const Process = struct {
 
     pub inline fn writeData(self: *const Process, addr: usize, data: []const u8) !void {
         for (0..data.len, data) |i, datum| {
+            // FIX: Account for alignment
             try ptrace(PTRACE.POKEDATA, self.pid, addr + i, datum);
         }
     }
@@ -136,7 +137,7 @@ pub const Process = struct {
         var inst: usize = undefined;
         std.log.debug("Patching 0x{x} with a breakpoint...", .{addr});
         try ptrace(PTRACE.PEEKDATA, self.pid, addr, @intFromPtr(&inst));
-        try ptrace(PTRACE.POKEDATA, self.pid, addr, 0xCC);
+        try ptrace(PTRACE.POKEDATA, self.pid, addr, (inst & ~@as(usize, 0xFF)) | 0xCC);
 
         std.log.debug("Continuing until breakpoint @ 0x{x}...", .{addr});
         var signal: u32 = std.posix.SIG.CONT;

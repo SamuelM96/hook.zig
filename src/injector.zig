@@ -109,7 +109,7 @@ pub const Injector = struct {
             var inst: usize = undefined;
             std.log.debug("Patching 0x{x} with a breakpoint...", .{addr});
             try ptrace(PTRACE.PEEKDATA, self.target.pid, addr, @intFromPtr(&inst));
-            try ptrace(PTRACE.POKEDATA, self.target.pid, addr, 0xCC);
+            try ptrace(PTRACE.POKEDATA, self.target.pid, addr, (inst & ~@as(usize, 0xFF)) | 0xCC);
             try self.hooked_addresses.put(addr, inst);
         }
 
