@@ -380,8 +380,11 @@ pub const Process = struct {
         const region_file = try std.fs.openFileAbsolute(region_path, .{});
         const raw_elf = try region_file.readToEndAlloc(self.allocator, std.math.maxInt(usize));
 
+        // TODO: Handle other types of headers
+        const hdr64 = @as(*const elf.Elf64_Ehdr, @ptrCast(@alignCast(raw_elf[0..@sizeOf(elf.Elf64_Ehdr)])));
+
         const func_offset = try getFunctionOffset(raw_elf, func_name);
-        const func_addr = base + func_offset;
+        const func_addr = if (hdr64.e_type == elf.ET.DYN) base + func_offset else func_offset;
         std.log.info("Located {s} @ offset 0x{x} (0x{x})", .{ func_name, func_offset, func_addr });
         return func_addr;
     }
