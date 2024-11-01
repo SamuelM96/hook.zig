@@ -65,6 +65,21 @@ pub const Injector = struct {
     }
 
     pub fn deinit(self: *const Injector) !void {
+        std.log.debug("Stopping process {d}...", .{self.target.pid});
+        try std.posix.kill(self.target.pid, std.posix.SIG.STOP);
+        const res = std.posix.waitpid(self.target.pid, 0);
+        if (!std.posix.W.IFSTOPPED(res.status)) {
+            std.log.debug("Error: {}", .{res.status});
+            return error.WaitpidFailed;
+        }
+        var iter = self.hooked_addresses.iterator();
+        std.log.info("Unhooking {d} functions...", .{self.hooked_addresses.count()});
+        while (iter.next()) |entry| {
+            const addr = entry.key_ptr.*;
+            const inst = entry.value_ptr.*;
+            std.log.debug("Unhooking 0x{x}...", .{addr});
+            try ptrace(PTRACE.POKEDATA, self.target.pid, addr, inst);
+        }
         std.log.debug("Unloading runtime...", .{});
         const clean_result = try self.target.execFunc(self.clean_addr, &[_]usize{});
         std.log.debug("clean() -> {d}", .{clean_result});
@@ -73,6 +88,8 @@ pub const Injector = struct {
         }
 
         try self.target.unloadLibrary(self.payload_handle);
+        std.log.debug("Resuming process {d}...", .{self.target.pid});
+        try ptrace(PTRACE.CONT, self.target.pid, 0, 0);
         // TODO: Clean up mmap'd memory
     }
 
@@ -103,14 +120,14 @@ pub const Injector = struct {
 
         const rwx_mem = try self.target.injectMmap(0, code.len + 1, .{});
         try self.target.writeData(rwx_mem, code);
-        if (try self.target.execFunc(self.hook_addr, &[_]usize{ addr, rwx_mem }) != 0) {
-            return error.HookFuncFailed;
-        } else {
+        if (try self.target.execFunc(self.hook_addr, &[_]usize{ addr, rwx_mem }) == 0) {
             var inst: usize = undefined;
             std.log.debug("Patching 0x{x} with a breakpoint...", .{addr});
             try ptrace(PTRACE.PEEKDATA, self.target.pid, addr, @intFromPtr(&inst));
             try ptrace(PTRACE.POKEDATA, self.target.pid, addr, (inst & ~@as(usize, 0xFF)) | 0xCC);
             try self.hooked_addresses.put(addr, inst);
+        } else {
+            return error.HookFuncFailed;
         }
 
         // - Map function address to callback ID

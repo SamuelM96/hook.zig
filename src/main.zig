@@ -10,9 +10,40 @@ var CSHandle: c.csh = undefined;
 
 // TODO: REPL for live code exec
 
+// HACK: Not a big fan of this approach...
+// Must be a better way of handling this state and cleanly exiting
+var target: ?process.Process = null;
+var lua_injector: ?injector.Injector = null;
+fn signalHandler(_: c_int) callconv(.C) void {
+    std.log.debug("SIGINT received", .{});
+    if (lua_injector) |i| {
+        i.deinit() catch |err| {
+            std.log.err("Failed to unload injector: {}", .{err});
+        };
+    }
+    if (target) |t| {
+        t.deinit();
+    }
+    std.posix.exit(1);
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
+
+    // TODO: Handle CTRL-C on other platforms
+    const sigact = std.os.linux.sigaction(
+        std.os.linux.SIG.INT,
+        &std.os.linux.Sigaction{
+            .handler = .{ .handler = signalHandler },
+            .mask = std.os.linux.empty_sigset,
+            .flags = 0,
+        },
+        null,
+    );
+    if (sigact != 0) {
+        return error.SignalHandlerError;
+    }
 
     const args = try std.process.argsAlloc(allocator);
     if (args.len != 4) {
@@ -20,8 +51,7 @@ pub fn main() !void {
         std.log.err("usage: {s} <pid> <library> <code_or_file>", .{prog});
         return;
     }
-    const target = process.Process.init(allocator, try std.fmt.parseInt(std.posix.pid_t, args[1], 10));
-    defer target.deinit();
+    target = process.Process.init(allocator, try std.fmt.parseInt(std.posix.pid_t, args[1], 10));
     const lib_path = try std.fs.path.resolve(allocator, &.{args[2]});
     defer allocator.free(lib_path);
 
@@ -31,28 +61,28 @@ pub fn main() !void {
     }
     defer _ = c.cs_close(&CSHandle);
 
-    if (!try target.isAlive()) {
+    if (!try target.?.isAlive()) {
         std.log.err("Process doesn't exist!", .{});
         std.posix.exit(1);
     }
 
-    try target.attach();
+    try target.?.attach();
 
-    var lua_injector = try injector.Injector.init(allocator, &target, lib_path);
-    defer lua_injector.deinit() catch |err| {
+    lua_injector = try injector.Injector.init(allocator, &target.?, lib_path);
+    defer lua_injector.?.deinit() catch |err| {
         std.log.err("Failed to unload injector: {}", .{err});
     };
 
-    lua_injector.injectFile(args[3]) catch {
-        try lua_injector.inject(args[3]);
+    lua_injector.?.injectFile(args[3]) catch {
+        try lua_injector.?.inject(args[3]);
     };
 
     std.log.info("Hooking function hook_me()...", .{});
-    const hook_me_addr = try target.getFuncFrom("", "hook_me");
+    const hook_me_addr = try target.?.getFuncFrom("", "hook_me");
     const code = "return function() print(\"hooked!\") end";
-    try lua_injector.hook(hook_me_addr, code);
+    try lua_injector.?.hook(hook_me_addr, code);
     std.log.info("Running injector...", .{});
-    try lua_injector.run();
+    try lua_injector.?.run();
 }
 
 // Do I *need* capstone? It does alleviate the need to write disassemblers for various platforms.
