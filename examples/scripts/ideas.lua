@@ -80,9 +80,25 @@ end
 -- TODO: Define entry hooks
 -- TODO: Define exit hooks
 -- TODO: Remove hooks
+-- TODO: Read/write registers in hooks
+-- TODO: Override return value
 -- TODO: Get memory ranges
--- TODO: Read/write arbitrary memory locations
+-- TODO: Read/write arbitrary memory locations (FFI?)
 -- TODO: Get traceback
+-- TODO: Interact with other threads
+-- TODO: Communicate with host
+-- TODO: Hook read/write access
+-- TODO: Get module symbols
+-- TODO: Get module imports
+-- TODO: Change memory protections
+-- TODO: Scan memory for patterns
+-- TODO: Allocate memory (does FFI handle this well?)
+-- TODO: Disassemble arbitrary locations with Capstone
+-- TODO: Hexdump data
+-- TODO: Create patches
+-- TODO: File I/O
+-- TODO: Interact with SQLite DBs
+-- TODO: Interact with other environments, e.g., Java, ObjC, Python, Ruby, Dotnet, etc
 
 -- Defining and calling a function
 local hook_me = Function.new(0x1001610, { "int" }, "int")
