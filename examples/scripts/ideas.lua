@@ -43,22 +43,18 @@ Module.__index = Module
 ---@field entry function? entry hook function
 ---@field exit function? exit hook function
 ---@field private _data table
-Function = {
-	__call = function(self, ...)
-		return self._data._func(...)
-	end,
-	original = function(self, ...)
-		-- TODO: Call original, unhooked version
-		return self.__func(...)
-	end,
-}
-Function.__index = Function
+Function = {}
+
+function Function:__call(...)
+	return self._data._func(...)
+end
 
 function Function:__newindex(key, value)
 	local update_func = false
 	if key == "entry" or key == "exit" then
 		if value == nil or type(value) == "function" then
 			-- TODO: Communicate hooking to server
+			print("[" .. key .. "] " .. string.format("0x%x", self.addr) .. " -> " .. (value and "func()" or "nil"))
 		else
 			error("Attempt to assign non-function value to " .. key)
 		end
@@ -75,7 +71,18 @@ function Function:__newindex(key, value)
 end
 
 function Function:__index(key)
-	return self._data[key]
+	return self._data[key] or Function[key]
+end
+
+function Function:original(...)
+	-- TODO: Call original, unhooked version
+	print("Calling original function @ " .. string.format("0x%x", self.addr))
+	return self._data._func(...)
+end
+
+function Function:replace(func)
+	-- TODO: Replace function
+	print("Replacing function @ " .. string.format("0x%x", self.addr))
 end
 
 -- Create a new Function object to call native functions.
@@ -120,14 +127,13 @@ end
 ---@param name string?
 ---
 ---@return integer[] | integer
-function Module:exports(self, name)
+function Module:exports(name)
 	-- Call out to payload server?
 	return 0
 end
 
 -- Provide ways to:
 -- TODO: Read/write registers in hooks
--- TODO: Override return value
 -- TODO: Get memory ranges
 -- TODO: Read/write arbitrary memory locations (FFI?)
 -- TODO: Get traceback
@@ -170,6 +176,7 @@ hook_me.entry = function(i)
 end
 hook_me.exit = function(ret)
 	print(ret)
+	-- TODO: Override return value
 	return 123
 end
 -- TODO: Remove hooks
@@ -180,13 +187,14 @@ hook_me.exit = nil
 hook_me.entry = function(i)
 	print("Replacing hook_me()...")
 	-- call original version?
-	print(hook_me:original(123))
+	print("Original: " .. hook_me:original(123))
 	-- Adding a return prevents calling the original function after, effectively replacing it?
 	return 42
 	-- No return (or return nil) would indicate to execute the function as normal after
 	-- What about native functions that return void (AKA nil)?
 end
 -- Alternatively, be explicit?
-hook_me.replace(function(i)
-	return 42
+hook_me:replace(function(i)
+	print("Original: " .. hook_me:original(123))
+	return i + 42
 end)
