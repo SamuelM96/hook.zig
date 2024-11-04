@@ -83,6 +83,60 @@ pub fn main() !void {
     try lua_injector.?.hook(hook_me_addr, code);
     std.log.info("Running injector...", .{});
     try lua_injector.?.run();
+
+    // TODO: Message handling
+    //
+    // I need a way for the payload to communicate back to the host.
+    // - Add/remove hooks
+    // - Send/receive data
+    //
+    // There's various IPC options available:
+    // - Shared memory + semaphores
+    //   - Potential extra option for transferring large amounts of data?
+    //   - High performance, but additional complexity due to semaphores
+    // - Unix domain sockets or TCP/IP sockets
+    //   - Classic, pretty much works everywhere, a lot of info available
+    //   - Unix domain sockets are performant
+    //   - TCP/IP sockets would work well for remote processes
+    // - Named pipes/FIFOs
+    //   - Simple
+    //   - Local only, mainly aimed at unidirectional communication
+    // - Signals
+    //   - Not really meant for data transfer and could affect the instrumented process
+    // - SysV/POSIX message queues
+    //   - Good for structured messages
+    //   - Asynchronous
+    //   - Could be complex, but probably not more than sockets I'd assume
+    //   - Potential overhead due to the message management
+    // - D-Bus
+    //   - Common message bus system on Linux
+    //   - Higher level of abstraction than sockets/shared memory
+    //   - Has built-in security features for access control
+    //   - Adds complexity
+    //   - Abstraction adds performance overhead (context switches a lot)
+    //
+    // There's probably more options on other platforms, but focusing on Linux for now.
+    // What about remote processes too? E.g., injecting into a separate device (mobile, embedded, etc)
+    //
+    // Sockets seem to be a good way to go. Cross-platform support seems good, and the ability
+    // to switch between local and remote connections is nice too. I'd need to build out the
+    // abstractions myself.
+    //
+    // Once the transport mechanism has been decided, there's still the message format.
+    // - Any standardised options available?
+    // - What metadata to include?
+    //   - Version information
+    //   - Message type
+    //   - Sequence number
+    //   - Timestamps?
+    // - Message size? Fragmentation? Variable size?
+    // - Extensibility? Backwards compatibility?
+    // - Encoding? Binary (protobufs? custom?), JSON, XML, etc
+    // - Security?
+    //   - Access controls: don't want random processes getting access
+    //   - Input validation: don't want the target to attack back
+    // - Acknowledgement? Synchronisation?
+    // - Error handling? Recovery?
 }
 
 // Do I *need* capstone? It does alleviate the need to write disassemblers for various platforms.

@@ -7,6 +7,9 @@ const c = @cImport({
 
 var L: ?*c.lua_State = null;
 var hooks: std.AutoHashMap(usize, c_int) = undefined;
+// TODO: Combined allocator strategies
+// Stack allocator for small allocations?
+// Page allocator for larger allocations?
 var allocator = std.heap.page_allocator;
 
 export fn load() usize {

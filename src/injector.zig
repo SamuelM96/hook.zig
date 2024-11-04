@@ -116,6 +116,8 @@ pub const Injector = struct {
     }
 
     pub fn hook(self: *Injector, addr: usize, code: []const u8) !void {
+        // TODO: Alternatives to breakpoint hooking?
+        // Inject shellcode and override entry with trampoline?
         std.log.info("Hooking function @ 0x{x}", .{addr});
 
         const rwx_mem = try self.target.injectMmap(0, code.len + 1, .{});
