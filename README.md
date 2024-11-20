@@ -15,5 +15,9 @@ zig build
 ## Usage
 
 ```bash
-hook.zig <pid> <library_to_load>
+hook.zig <pid> <library_to_load> <lua_file_or_code>
+
+# Using the examples:
+zig build
+./zig-out/bin/hook.zig ./zig-out/lib/libpayload.so 'print("Hello world!")'
 ```
